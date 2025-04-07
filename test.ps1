@@ -1,123 +1,110 @@
-# PowerShell script to count Active Directory group members by month
-# Replace "YourGroupName" with the actual AD group name
+# Script optimizado para contar miembros de grupo de Active Directory por mes
+# Reemplaza "YourGroupName" con el nombre real del grupo
 
-# Import the Active Directory module
+# Importar el módulo de Active Directory
 Import-Module ActiveDirectory
 
-# Define the group name
+# Definir el nombre del grupo
 $groupName = "YourGroupName"
 
-# Get the current date and set it to April for this example
-$currentDate = Get-Date -Month 4 -Day 30 -Year 2024
+# Configurar para los primeros 3 meses de 2025
+$currentYear = 2025
+$currentDate = Get-Date -Month 3 -Day 31 -Year $currentYear
 
-# Get all members of the specified group
-$allMembers = Get-ADGroupMember -Identity $groupName | 
+Write-Host "Obteniendo miembros del grupo $groupName..." -ForegroundColor Yellow
+
+# Obtener todos los miembros del grupo especificado en una sola consulta eficiente
+$allMembers = Get-ADGroupMember -Identity $groupName -Recursive | 
               Where-Object {$_.objectClass -eq "user"} | 
-              ForEach-Object {Get-ADUser $_ -Properties whenCreated}
+              Get-ADUser -Properties whenCreated
 
-# Count total members
+# Contar miembros totales
 $totalMembers = $allMembers.Count
+Write-Host "Procesando $totalMembers usuarios..." -ForegroundColor Yellow
 
-# Filter members by creation date
-$aprilMembers = $allMembers | Where-Object {$_.whenCreated -ge (Get-Date -Month 4 -Day 1 -Year 2024) -and $_.whenCreated -le $currentDate}
-$marchMembers = $allMembers | Where-Object {$_.whenCreated -ge (Get-Date -Month 3 -Day 1 -Year 2024) -and $_.whenCreated -lt (Get-Date -Month 4 -Day 1 -Year 2024)}
-$februaryMembers = $allMembers | Where-Object {$_.whenCreated -ge (Get-Date -Month 2 -Day 1 -Year 2024) -and $_.whenCreated -lt (Get-Date -Month 3 -Day 1 -Year 2024)}
-$januaryMembers = $allMembers | Where-Object {$_.whenCreated -ge (Get-Date -Month 1 -Day 1 -Year 2024) -and $_.whenCreated -lt (Get-Date -Month 2 -Day 1 -Year 2024)}
+# Crear un hashtable para almacenar usuarios por mes (más eficiente)
+$usersByMonth = @{
+    "January" = @()
+    "February" = @()
+    "March" = @()
+}
 
-# Count members created in each month
-$aprilCreated = $aprilMembers.Count
-$marchCreated = $marchMembers.Count
-$februaryCreated = $februaryMembers.Count
-$januaryCreated = $januaryMembers.Count
-
-# Calculate members present in each month (cumulative)
-$aprilCount = $totalMembers
-$marchCount = $totalMembers - $aprilCreated
-$februaryCount = $marchCount - $marchCreated
-$januaryCount = $februaryCount - $februaryCreated
-
-# Create a results array for CSV export
-$results = @()
+# Clasificar usuarios por mes en una sola pasada
 foreach ($member in $allMembers) {
-    $creationMonth = $member.whenCreated.Month
-    $creationYear = $member.whenCreated.Year
+    $created = $member.whenCreated
     
-    $monthName = switch ($creationMonth) {
-        1 {"January"}
-        2 {"February"}
-        3 {"March"}
-        4 {"April"}
-        default {"Other"}
-    }
-    
-    if ($creationYear -eq 2024 -and $creationMonth -le 4) {
-        $results += [PSCustomObject]@{
-            UserName = $member.SamAccountName
-            DisplayName = $member.Name
-            CreatedOn = $member.whenCreated
-            CreationMonth = $monthName
+    # Solo procesar usuarios creados en 2025
+    if ($created.Year -eq $currentYear) {
+        switch ($created.Month) {
+            1 { $usersByMonth["January"] += $member }
+            2 { $usersByMonth["February"] += $member }
+            3 { $usersByMonth["March"] += $member }
         }
     }
 }
 
-# Export to CSV
-$results | Export-Csv -Path "ADGroupMembersByMonth.csv" -NoTypeInformation
+# Calcular conteos
+$januaryCreated = $usersByMonth["January"].Count
+$februaryCreated = $usersByMonth["February"].Count
+$marchCreated = $usersByMonth["March"].Count
 
-# Now display all results at the end
+# Calcular miembros presentes en cada mes (acumulativo)
+$marchCount = $totalMembers
+$februaryCount = $marchCount - $marchCreated
+$januaryCount = $februaryCount - $februaryCreated
+
+# Mostrar resultados
 Clear-Host
 Write-Host "===============================================" -ForegroundColor Cyan
-Write-Host "   ACTIVE DIRECTORY GROUP MEMBERS BY MONTH    " -ForegroundColor Cyan
+Write-Host "   MIEMBROS DE GRUPO DE AD POR MES $currentYear   " -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
-Write-Host "Group Name: $groupName" -ForegroundColor Green
-Write-Host "Total members: $totalMembers" -ForegroundColor Green
-Write-Host "Report Date: $(Get-Date)" -ForegroundColor Green
+Write-Host "Grupo: $groupName" -ForegroundColor Green
+Write-Host "Total miembros: $totalMembers" -ForegroundColor Green
+Write-Host "Fecha del informe: $(Get-Date)" -ForegroundColor Green
 Write-Host "===============================================" -ForegroundColor Cyan
 
-Write-Host "`nMONTHLY MEMBER COUNTS (2024):" -ForegroundColor Yellow
+Write-Host "`nCONTEO DE MIEMBROS POR MES ($currentYear):" -ForegroundColor Yellow
 Write-Host "-----------------------------------------------" -ForegroundColor Yellow
-Write-Host "Month      | Created | Total Present" -ForegroundColor Yellow
+Write-Host "Mes        | Creados | Total Presentes" -ForegroundColor Yellow
 Write-Host "-----------------------------------------------" -ForegroundColor Yellow
-Write-Host "January    | $januaryCreated".PadRight(12) -NoNewline
+Write-Host "Enero      | $januaryCreated".PadRight(12) -NoNewline
 Write-Host " | $januaryCount" -ForegroundColor White
-Write-Host "February   | $februaryCreated".PadRight(12) -NoNewline
+Write-Host "Febrero    | $februaryCreated".PadRight(12) -NoNewline
 Write-Host " | $februaryCount" -ForegroundColor White
-Write-Host "March      | $marchCreated".PadRight(12) -NoNewline
+Write-Host "Marzo      | $marchCreated".PadRight(12) -NoNewline
 Write-Host " | $marchCount" -ForegroundColor White
-Write-Host "April      | $aprilCreated".PadRight(12) -NoNewline
-Write-Host " | $aprilCount" -ForegroundColor White
 Write-Host "-----------------------------------------------" -ForegroundColor Yellow
 
-Write-Host "`nDETAILED RESULTS:" -ForegroundColor Magenta
-Write-Host "-----------------------------------------------" -ForegroundColor Magenta
+Write-Host "`nRESULTADOS DETALLADOS:" -ForegroundColor Magenta
 
-# Function to format the month's data
+# Función para mostrar datos del mes
 function Format-MonthData {
     param (
         [string]$Month,
         [array]$CreatedUsers,
-        [int]$TotalUsers
+        [int]$TotalUsers,
+        [string]$MonthSpanish
     )
     
-    Write-Host "`n$Month 2024:" -ForegroundColor Cyan
-    Write-Host "- Users created in $Month: $($CreatedUsers.Count)" -ForegroundColor White
-    Write-Host "- Total users present in $Month: $TotalUsers" -ForegroundColor White
+    Write-Host "`n$MonthSpanish $currentYear:" -ForegroundColor Cyan
+    Write-Host "- Usuarios creados en $MonthSpanish: $($CreatedUsers.Count)" -ForegroundColor White
+    Write-Host "- Total usuarios presentes en $MonthSpanish: $TotalUsers" -ForegroundColor White
     
     if ($CreatedUsers.Count -gt 0) {
-        Write-Host "`nUsers created in $Month:" -ForegroundColor Gray
+        Write-Host "`nUsuarios creados en $MonthSpanish:" -ForegroundColor Gray
         $CreatedUsers | ForEach-Object {
-            Write-Host "  - $($_.SamAccountName) ($($_.Name)) - Created: $($_.whenCreated.ToString('yyyy-MM-dd'))" -ForegroundColor White
+            Write-Host "  - $($_.SamAccountName) ($($_.Name)) - Creado: $($_.whenCreated.ToString('yyyy-MM-dd'))" -ForegroundColor White
         }
     } else {
-        Write-Host "  No users were created in $Month." -ForegroundColor Gray
+        Write-Host "  No se crearon usuarios en $MonthSpanish." -ForegroundColor Gray
     }
 }
 
-# Display detailed information for each month
-Format-MonthData -Month "January" -CreatedUsers $januaryMembers -TotalUsers $januaryCount
-Format-MonthData -Month "February" -CreatedUsers $februaryMembers -TotalUsers $februaryCount
-Format-MonthData -Month "March" -CreatedUsers $marchMembers -TotalUsers $marchCount
-Format-MonthData -Month "April" -CreatedUsers $aprilMembers -TotalUsers $aprilCount
+# Mostrar información detallada para cada mes
+Format-MonthData -Month "January" -CreatedUsers $usersByMonth["January"] -TotalUsers $januaryCount -MonthSpanish "Enero"
+Format-MonthData -Month "February" -CreatedUsers $usersByMonth["February"] -TotalUsers $februaryCount -MonthSpanish "Febrero"
+Format-MonthData -Month "March" -CreatedUsers $usersByMonth["March"] -TotalUsers $marchCount -MonthSpanish "Marzo"
 
 Write-Host "`n===============================================" -ForegroundColor Cyan
-Write-Host "Detailed information exported to: ADGroupMembersByMonth.csv" -ForegroundColor Green
+Write-Host "Informe completado para los primeros 3 meses de $currentYear" -ForegroundColor Green
 Write-Host "===============================================" -ForegroundColor Cyan
