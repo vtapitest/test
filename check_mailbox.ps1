@@ -7,12 +7,28 @@
     la ubicación de sus buzones en un entorno híbrido (Exchange On-Premises y Exchange Online).
     Clasifica a cada usuario según sus atributos y exporta los resultados a un archivo CSV.
 
+.PARAMETER OutputPath
+    Ruta completa donde se guardará el archivo CSV. Si no se especifica, se guardará en la misma carpeta del script.
+
+.EXAMPLE
+    .\Get-MailboxLocation.ps1
+    Ejecuta el script y guarda el CSV en la misma carpeta del script.
+
+.EXAMPLE
+    .\Get-MailboxLocation.ps1 -OutputPath "C:\Informes\estado_buzones.csv"
+    Ejecuta el script y guarda el CSV en la ruta especificada.
+
 .NOTES
     Nombre: Get-MailboxLocation.ps1
     Autor: v0 Assistant
     Fecha: 10/04/2025
     Requisitos: PowerShell 5.1 o superior, Módulo ActiveDirectory
 #>
+
+param (
+    [Parameter(Mandatory=$false)]
+    [string]$OutputPath = ""
+)
 
 # Importar el módulo de Active Directory
 Import-Module ActiveDirectory
@@ -102,8 +118,24 @@ function Get-MailboxLocation {
     return "Indeterminado"
 }
 
-# Ruta para el archivo CSV de salida
-$csvPath = Join-Path -Path $PSScriptRoot -ChildPath "estado_buzones.csv"
+# Determinar la ruta para el archivo CSV de salida
+if ([string]::IsNullOrEmpty($OutputPath)) {
+    $csvPath = Join-Path -Path $PSScriptRoot -ChildPath "estado_buzones.csv"
+} else {
+    $csvPath = $OutputPath
+    
+    # Verificar si la carpeta existe, si no, crearla
+    $directory = Split-Path -Path $csvPath -Parent
+    if (!(Test-Path -Path $directory -PathType Container) -and $directory -ne "") {
+        try {
+            New-Item -Path $directory -ItemType Directory -Force | Out-Null
+            Write-Host "Se ha creado el directorio: $directory" -ForegroundColor Yellow
+        } catch {
+            Write-Host "Error al crear el directorio: $($_.Exception.Message)" -ForegroundColor Red
+            exit
+        }
+    }
+}
 
 # Obtener todos los usuarios de Active Directory con los atributos necesarios
 Write-Host "Obteniendo usuarios de Active Directory..." -ForegroundColor Cyan
@@ -157,8 +189,12 @@ Write-Host "`nResultados del análisis:" -ForegroundColor Green
 $results | Format-Table -Property Nombre, SamAccountName, Mail, msExchRecipientTypeDetails, Interpretacion, Clasificacion -AutoSize
 
 # Exportar los resultados a un archivo CSV
-$results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-Write-Host "`nLos resultados han sido exportados a: $csvPath" -ForegroundColor Yellow
+try {
+    $results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Host "`nLos resultados han sido exportados a: $csvPath" -ForegroundColor Yellow
+} catch {
+    Write-Host "`nError al exportar el archivo CSV: $($_.Exception.Message)" -ForegroundColor Red
+}
 
 # Mostrar un resumen
 $summary = $results | Group-Object -Property Clasificacion | Select-Object Name, Count
