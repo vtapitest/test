@@ -18,7 +18,6 @@ Write-Host "Se encontraron $($gMSAs.Count) cuentas gMSA." -ForegroundColor Green
 
 # Definir grupos privilegiados/inadecuados para gMSAs
 $privilegedGroups = @(
-    "Domain Computers",
     "Domain Admins",
     "Enterprise Admins",
     "Schema Admins",
@@ -27,7 +26,8 @@ $privilegedGroups = @(
     "Backup Operators",
     "Server Operators",
     "Print Operators",
-    "Domain Controllers"
+    "Domain Controllers",
+    "Domain Computers"  # Añadido Domain Computers como grupo inadecuado
 )
 
 # Definir atributos que deberían verificarse
@@ -116,6 +116,7 @@ foreach ($gMSA in $gMSAs) {
     $memberOfGroups = @()
     $inPrivilegedGroups = $false
     $privilegedGroupsList = @()
+    $inDomainComputers = $false  # Nueva variable para Domain Computers
     
     foreach ($group in $gMSA.MemberOf) {
         try {
@@ -125,6 +126,11 @@ foreach ($gMSA in $gMSAs) {
             if ($privilegedGroups -contains $groupName) {
                 $inPrivilegedGroups = $true
                 $privilegedGroupsList += $groupName
+                
+                # Verificar específicamente Domain Computers
+                if ($groupName -eq "Domain Computers") {
+                    $inDomainComputers = $true
+                }
             }
         }
         catch {
@@ -150,9 +156,20 @@ foreach ($gMSA in $gMSAs) {
     if ($null -eq $kerberosEncryptionTypes -or $kerberosEncryptionTypes -eq 0) {
         $validKerberosEncryption = $false
     }
-    elseif (($kerberosEncryptionTypes -band 0x3) -ne 0) {
-        # Verifica si usa DES o RC4 (encriptaciones débiles)
-        $validKerberosEncryption = $false
+    else {
+        # Convertir a entero para asegurar que la operación de bits funcione
+        try {
+            $encryptionValue = [int]$kerberosEncryptionTypes
+            # Verifica si usa DES (0x1) o RC4 (0x2) (encriptaciones débiles)
+            if (($encryptionValue -band 3) -ne 0) {
+                $validKerberosEncryption = $false
+            }
+        }
+        catch {
+            # Si no se puede convertir, asumimos que hay un problema con la encriptación
+            $validKerberosEncryption = $false
+            Write-Host "Error al verificar el tipo de encriptación para $($gMSA.Name): $_" -ForegroundColor Yellow
+        }
     }
     
     # Verificar si la cuenta tiene SPN duplicados
@@ -200,6 +217,7 @@ foreach ($gMSA in $gMSAs) {
         AuthorizedComputers = $authorizedComputerDetails
         InPrivilegedGroups = $inPrivilegedGroups
         PrivilegedGroupsList = $privilegedGroupsList
+        InDomainComputers = $inDomainComputers  # Nueva propiedad
         MemberOfGroups = $memberOfGroups
         HasMissingAttributes = $hasMissingAttributes
         MissingAttributes = $missingAttributes
@@ -216,7 +234,7 @@ foreach ($gMSA in $gMSAs) {
 # Exportar a CSV
 $csvPath = "$env:USERPROFILE\Desktop\Analisis_gMSA_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 $results | Select-Object -Property Name, DN, HasManagedPassword, Enabled, HasAuthorizedComputers, AuthorizedComputersCount, 
-    AllAuthorizedComputersExist, AllAuthorizedComputersHavePermission, InPrivilegedGroups, HasMissingAttributes, 
+    AllAuthorizedComputersExist, AllAuthorizedComputersHavePermission, InPrivilegedGroups, InDomainComputers, HasMissingAttributes, 
     ValidKerberosEncryption, HasDuplicateSPNs, HasCorrectPasswordSettings | 
     Export-Csv -Path $csvPath -NoTypeInformation
 Write-Host "Resultados exportados a: $csvPath" -ForegroundColor Green
@@ -440,6 +458,10 @@ $htmlReport = @"
                 <h3>En Grupos Privilegiados</h3>
                 <div class="big-number">$($results | Where-Object { $_.InPrivilegedGroups -eq $true } | Measure-Object | Select-Object -ExpandProperty Count)</div>
             </div>
+            <div class="summary-box red">
+                <h3>En Domain Computers</h3>
+                <div class="big-number">$($results | Where-Object { $_.InDomainComputers -eq $true } | Measure-Object | Select-Object -ExpandProperty Count)</div>
+            </div>
             <div class="summary-box yellow">
                 <h3>Atributos Faltantes</h3>
                 <div class="big-number">$($results | Where-Object { $_.HasMissingAttributes -eq $true } | Measure-Object | Select-Object -ExpandProperty Count)</div>
@@ -505,6 +527,7 @@ $htmlReport += @"
                 <tr>
                     <th>Nombre</th>
                     <th>En Grupos Privilegiados</th>
+                    <th>En Domain Computers</th>
                     <th>Grupos Privilegiados</th>
                     <th>Encriptación Válida</th>
                     <th>SPNs Duplicados</th>
@@ -513,6 +536,7 @@ $htmlReport += @"
 
 foreach ($result in $results) {
     $privilegedClass = if ($result.InPrivilegedGroups) { "danger" } else { "success" }
+    $domainComputersClass = if ($result.InDomainComputers) { "danger" } else { "success" }
     $encryptionClass = if ($result.ValidKerberosEncryption) { "success" } else { "warning" }
     $spnClass = if ($result.HasDuplicateSPNs) { "danger" } else { "success" }
     
@@ -520,6 +544,7 @@ foreach ($result in $results) {
                 <tr>
                     <td>$($result.Name)</td>
                     <td class="$privilegedClass">$($result.InPrivilegedGroups)</td>
+                    <td class="$domainComputersClass">$($result.InDomainComputers)</td>
                     <td>$(if ($result.PrivilegedGroupsList.Count -gt 0) { $result.PrivilegedGroupsList -join ", " } else { "Ninguno" })</td>
                     <td class="$encryptionClass">$($result.ValidKerberosEncryption)</td>
                     <td class="$spnClass">$($result.HasDuplicateSPNs)</td>
@@ -583,6 +608,9 @@ foreach ($result in $results) {
     if ($result.InPrivilegedGroups) {
         $statusBadges += '<span class="badge badge-danger">Grupo Privilegiado</span>'
     }
+    if ($result.InDomainComputers) {
+        $statusBadges += '<span class="badge badge-danger">En Domain Computers</span>'
+    }
     if ($result.HasMissingAttributes) {
         $statusBadges += '<span class="badge badge-warning">Atributos Faltantes</span>'
     }
@@ -611,10 +639,11 @@ foreach ($result in $results) {
                 <div class="flex-item">
                     <h3>Seguridad</h3>
                     <p><strong>En Grupos Privilegiados:</strong> <span class="$(if ($result.InPrivilegedGroups) { "danger" } else { "success" })">$($result.InPrivilegedGroups)</span></p>
+                    <p><strong>En Domain Computers:</strong> <span class="$(if ($result.InDomainComputers) { "danger" } else { "success" })">$($result.InDomainComputers)</span></p>
                     <p><strong>Grupos Privilegiados:</strong> $(if ($result.PrivilegedGroupsList.Count -gt 0) { $result.PrivilegedGroupsList -join ", " } else { "Ninguno" })</p>
                     <p><strong>Encriptación Kerberos Válida:</strong> <span class="$(if ($result.ValidKerberosEncryption) { "success" } else { "warning" })">$($result.ValidKerberosEncryption)</span></p>
                     <p><strong>Tipo de Encriptación:</strong> $($result.KerberosEncryptionType)</p>
-                    <p><strong>SPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDuplicateSPNs)</span></p>
+                    <p><strong>SPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDSPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDuplicateSPNs)</span></p>
                 </div>
             </div>
             
