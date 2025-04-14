@@ -18,6 +18,7 @@ Write-Host "Se encontraron $($gMSAs.Count) cuentas gMSA." -ForegroundColor Green
 
 # Definir grupos privilegiados/inadecuados para gMSAs
 $privilegedGroups = @(
+    "Domain Computers",
     "Domain Admins",
     "Enterprise Admins",
     "Schema Admins",
@@ -629,8 +630,6 @@ foreach ($result in $results) {
     if ($null -ne $result.SPNs -and $result.SPNs.Count -gt 0) {
         foreach ($spn in $result.SPNs) {
             $spnClass = if ($result.DuplicateSPNs -contains $spn) { "danger" } else { "success" }
-            $htmlReport += @"
-                        <li class="$spnClass">$spn $(if ($result.DuplicateS
             $htmlReport += @"
                         <li class="$spnClass">$spn $(if ($result.DuplicateSPNs -contains $spn) { "<span class='badge badge-danger'>Duplicado</span>" } else { "" })</li>
 "@
