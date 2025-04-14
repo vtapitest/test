@@ -668,9 +668,6 @@ foreach ($result in $results) {
     $statusBadgesHtml = if ($statusBadges.Count -gt 0) { $statusBadges -join " " } else { '<span class="badge badge-success">OK</span>' }
     
     $htmlReport += @"
-        <button class="accordion">$($result.Name) - $statusBadgesHtml</button>  }
-    
-    $htmlReport += @"
         <button class="accordion">$($result.Name) - $statusBadgesHtml</button>
         <div class="panel">
             <div class="flex-container">
