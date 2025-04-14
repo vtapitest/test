@@ -40,6 +40,16 @@ $requiredAttributes = @(
 $results = @()
 $allAuthorizedComputerDetails = @()
 
+# Primero, obtener el SID del grupo Domain Computers para una comparación más confiable
+try {
+    $domainComputersGroup = Get-ADGroup -Identity "Domain Computers" -Properties objectSid
+    $domainComputersSID = $domainComputersGroup.objectSid.Value
+    Write-Host "SID del grupo Domain Computers: $domainComputersSID" -ForegroundColor Cyan
+} catch {
+    Write-Host "No se pudo obtener el grupo Domain Computers. Error: $_" -ForegroundColor Yellow
+    $domainComputersSID = $null
+}
+
 foreach ($gMSA in $gMSAs) {
     Write-Host "Analizando gMSA: $($gMSA.Name)" -ForegroundColor Cyan
     
@@ -118,24 +128,58 @@ foreach ($gMSA in $gMSAs) {
     $privilegedGroupsList = @()
     $inDomainComputers = $false  # Nueva variable para Domain Computers
     
+    # Verificar pertenencia directa a grupos
     foreach ($group in $gMSA.MemberOf) {
         try {
-            $groupName = (Get-ADGroup -Identity $group).Name
+            $adGroup = Get-ADGroup -Identity $group -Properties objectSid
+            $groupName = $adGroup.Name
+            $groupSID = $adGroup.objectSid.Value
+            
             $memberOfGroups += $groupName
             
             if ($privilegedGroups -contains $groupName) {
                 $inPrivilegedGroups = $true
                 $privilegedGroupsList += $groupName
-                
-                # Verificar específicamente Domain Computers
-                if ($groupName -eq "Domain Computers") {
-                    $inDomainComputers = $true
-                }
+            }
+            
+            # Verificar específicamente Domain Computers usando SID (más confiable)
+            if ($domainComputersSID -and $groupSID -eq $domainComputersSID) {
+                $inDomainComputers = $true
+                Write-Host "La cuenta gMSA $($gMSA.Name) es miembro del grupo Domain Computers (verificado por SID)" -ForegroundColor Red
+            }
+            # Verificación adicional por nombre (respaldo)
+            elseif ($groupName -eq "Domain Computers") {
+                $inDomainComputers = $true
+                Write-Host "La cuenta gMSA $($gMSA.Name) es miembro del grupo Domain Computers (verificado por nombre)" -ForegroundColor Red
             }
         }
         catch {
             # Grupo no encontrado o error al obtener información
             $memberOfGroups += "Error: $group"
+            Write-Host "Error al verificar el grupo $group para la cuenta gMSA $($gMSA.Name): $_" -ForegroundColor Yellow
+        }
+    }
+    
+    # Verificación adicional usando Get-ADGroupMember (para capturar membresías que podrían no aparecer en MemberOf)
+    if (-not $inDomainComputers -and $domainComputersSID) {
+        try {
+            $domainComputersMembers = Get-ADGroupMember -Identity $domainComputersSID
+            foreach ($member in $domainComputersMembers) {
+                if ($member.distinguishedName -eq $gMSA.DistinguishedName) {
+                    $inDomainComputers = $true
+                    $inPrivilegedGroups = $true
+                    if (-not ($privilegedGroupsList -contains "Domain Computers")) {
+                        $privilegedGroupsList += "Domain Computers"
+                    }
+                    if (-not ($memberOfGroups -contains "Domain Computers")) {
+                        $memberOfGroups += "Domain Computers"
+                    }
+                    Write-Host "La cuenta gMSA $($gMSA.Name) es miembro del grupo Domain Computers (verificado por Get-ADGroupMember)" -ForegroundColor Red
+                    break
+                }
+            }
+        } catch {
+            Write-Host "Error al verificar miembros del grupo Domain Computers: $_" -ForegroundColor Yellow
         }
     }
     
@@ -622,6 +666,9 @@ foreach ($result in $results) {
     }
     
     $statusBadgesHtml = if ($statusBadges.Count -gt 0) { $statusBadges -join " " } else { '<span class="badge badge-success">OK</span>' }
+    
+    $htmlReport += @"
+        <button class="accordion">$($result.Name) - $statusBadgesHtml</button>  }
     
     $htmlReport += @"
         <button class="accordion">$($result.Name) - $statusBadgesHtml</button>
