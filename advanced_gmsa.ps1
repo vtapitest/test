@@ -1,4 +1,4 @@
-# Script para analizar cuentas gMSA en Active Directory y generar informe HTML
+# Script unificado para análisis completo de cuentas gMSA en Active Directory
 # Author: v0
 # Date: 2025-04-14
 
@@ -15,6 +15,25 @@ if ($gMSAs.Count -eq 0) {
 }
 
 Write-Host "Se encontraron $($gMSAs.Count) cuentas gMSA." -ForegroundColor Green
+
+# Definir grupos privilegiados/inadecuados para gMSAs
+$privilegedGroups = @(
+    "Domain Admins",
+    "Enterprise Admins",
+    "Schema Admins",
+    "Administrators",
+    "Account Operators",
+    "Backup Operators",
+    "Server Operators",
+    "Print Operators",
+    "Domain Controllers"
+)
+
+# Definir atributos que deberían verificarse
+$requiredAttributes = @(
+    "msDS-GroupMSAMembership",
+    "servicePrincipalName"
+)
 
 # Crear un array para almacenar resultados
 $results = @()
@@ -92,6 +111,77 @@ foreach ($gMSA in $gMSAs) {
         }
     }
     
+    # Verificar pertenencia a grupos privilegiados
+    $memberOfGroups = @()
+    $inPrivilegedGroups = $false
+    $privilegedGroupsList = @()
+    
+    foreach ($group in $gMSA.MemberOf) {
+        try {
+            $groupName = (Get-ADGroup -Identity $group).Name
+            $memberOfGroups += $groupName
+            
+            if ($privilegedGroups -contains $groupName) {
+                $inPrivilegedGroups = $true
+                $privilegedGroupsList += $groupName
+            }
+        }
+        catch {
+            # Grupo no encontrado o error al obtener información
+            $memberOfGroups += "Error: $group"
+        }
+    }
+    
+    # Verificar atributos requeridos
+    $missingAttributes = @()
+    foreach ($attr in $requiredAttributes) {
+        if ($null -eq $gMSA.$attr -or $gMSA.$attr.Count -eq 0) {
+            $missingAttributes += $attr
+        }
+    }
+    $hasMissingAttributes = $missingAttributes.Count -gt 0
+    
+    # Verificar configuración de KerberosEncryptionType
+    $validKerberosEncryption = $true
+    $kerberosEncryptionTypes = $gMSA.KerberosEncryptionType
+    
+    # Verificar si usa encriptaciones débiles o está vacío
+    if ($null -eq $kerberosEncryptionTypes -or $kerberosEncryptionTypes -eq 0) {
+        $validKerberosEncryption = $false
+    }
+    elseif (($kerberosEncryptionTypes -band 0x3) -ne 0) {
+        # Verifica si usa DES o RC4 (encriptaciones débiles)
+        $validKerberosEncryption = $false
+    }
+    
+    # Verificar si la cuenta tiene SPN duplicados
+    $hasDuplicateSPNs = $false
+    $duplicateSPNs = @()
+    
+    if ($null -ne $gMSA.ServicePrincipalName -and $gMSA.ServicePrincipalName.Count -gt 0) {
+        foreach ($spn in $gMSA.ServicePrincipalName) {
+            try {
+                $spnCheck = Get-ADObject -Filter "ServicePrincipalName -eq '$spn'" -Properties ServicePrincipalName, distinguishedName
+                if ($spnCheck.Count -gt 1) {
+                    $hasDuplicateSPNs = $true
+                    $duplicateSPNs += $spn
+                }
+            }
+            catch {
+                # Error al verificar SPN
+            }
+        }
+    }
+    
+    # Verificar si la cuenta tiene una política de contraseña correcta
+    $hasCorrectPasswordSettings = $true
+    
+    # Verificar si la cuenta está configurada para no expirar (lo cual es correcto para gMSAs)
+    $passwordNeverExpires = $gMSA.PasswordNeverExpires
+    if ($passwordNeverExpires -ne $true) {
+        $hasCorrectPasswordSettings = $false
+    }
+    
     # Añadir a resultados
     $results += [PSCustomObject]@{
         Name = $gMSA.Name
@@ -107,12 +197,26 @@ foreach ($gMSA in $gMSAs) {
             $false 
         }
         AuthorizedComputers = $authorizedComputerDetails
+        InPrivilegedGroups = $inPrivilegedGroups
+        PrivilegedGroupsList = $privilegedGroupsList
+        MemberOfGroups = $memberOfGroups
+        HasMissingAttributes = $hasMissingAttributes
+        MissingAttributes = $missingAttributes
+        ValidKerberosEncryption = $validKerberosEncryption
+        KerberosEncryptionType = $kerberosEncryptionTypes
+        HasDuplicateSPNs = $hasDuplicateSPNs
+        DuplicateSPNs = $duplicateSPNs
+        HasCorrectPasswordSettings = $hasCorrectPasswordSettings
+        PasswordNeverExpires = $passwordNeverExpires
+        SPNs = $gMSA.ServicePrincipalName
     }
 }
 
 # Exportar a CSV
 $csvPath = "$env:USERPROFILE\Desktop\Analisis_gMSA_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-$results | Select-Object -Property Name, DN, HasManagedPassword, Enabled, HasAuthorizedComputers, AuthorizedComputersCount, AllAuthorizedComputersExist, AllAuthorizedComputersHavePermission | 
+$results | Select-Object -Property Name, DN, HasManagedPassword, Enabled, HasAuthorizedComputers, AuthorizedComputersCount, 
+    AllAuthorizedComputersExist, AllAuthorizedComputersHavePermission, InPrivilegedGroups, HasMissingAttributes, 
+    ValidKerberosEncryption, HasDuplicateSPNs, HasCorrectPasswordSettings | 
     Export-Csv -Path $csvPath -NoTypeInformation
 Write-Host "Resultados exportados a: $csvPath" -ForegroundColor Green
 
@@ -126,7 +230,7 @@ $htmlReport = @"
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Análisis de Cuentas gMSA</title>
+    <title>Análisis Completo de Cuentas gMSA</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -182,6 +286,7 @@ $htmlReport = @"
         .summary {
             display: flex;
             justify-content: space-between;
+            flex-wrap: wrap;
             margin-bottom: 20px;
         }
         .summary-box {
@@ -191,6 +296,7 @@ $htmlReport = @"
             box-shadow: 0 4px 8px rgba(0,0,0,0.1);
             width: 23%;
             text-align: center;
+            margin-bottom: 10px;
         }
         .summary-box h3 {
             margin-top: 0;
@@ -240,12 +346,76 @@ $htmlReport = @"
             color: #666;
             margin-top: 20px;
         }
+        .badge {
+            display: inline-block;
+            padding: 3px 7px;
+            font-size: 12px;
+            font-weight: bold;
+            line-height: 1;
+            color: #fff;
+            text-align: center;
+            white-space: nowrap;
+            vertical-align: middle;
+            border-radius: 10px;
+        }
+        .badge-success {
+            background-color: #5cb85c;
+        }
+        .badge-warning {
+            background-color: #f0ad4e;
+        }
+        .badge-danger {
+            background-color: #d9534f;
+        }
+        .tab {
+            overflow: hidden;
+            border: 1px solid #ccc;
+            background-color: #f1f1f1;
+            border-radius: 5px 5px 0 0;
+        }
+        .tab button {
+            background-color: inherit;
+            float: left;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            padding: 14px 16px;
+            transition: 0.3s;
+            font-size: 17px;
+        }
+        .tab button:hover {
+            background-color: #ddd;
+        }
+        .tab button.active {
+            background-color: #0066cc;
+            color: white;
+        }
+        .tabcontent {
+            display: none;
+            padding: 6px 12px;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 5px 5px;
+            animation: fadeEffect 1s;
+        }
+        @keyframes fadeEffect {
+            from {opacity: 0;}
+            to {opacity: 1;}
+        }
+        .flex-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .flex-item {
+            flex: 1 1 300px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Análisis de Cuentas gMSA en Active Directory</h1>
-        <p>Este informe muestra un análisis detallado de todas las cuentas de servicio administradas del dominio (gMSA).</p>
+        <h1>Análisis Completo de Cuentas gMSA en Active Directory</h1>
+        <p>Este informe muestra un análisis detallado de todas las cuentas de servicio administradas del dominio (gMSA), incluyendo configuración, permisos, grupos y atributos.</p>
         <p class="timestamp">Informe generado el $(Get-Date -Format "dd/MM/yyyy HH:mm:ss")</p>
         
         <div class="summary">
@@ -265,21 +435,44 @@ $htmlReport = @"
                 <h3>Sin Equipos</h3>
                 <div class="big-number">$($results | Where-Object { $_.HasAuthorizedComputers -eq $false } | Measure-Object | Select-Object -ExpandProperty Count)</div>
             </div>
+            <div class="summary-box red">
+                <h3>En Grupos Privilegiados</h3>
+                <div class="big-number">$($results | Where-Object { $_.InPrivilegedGroups -eq $true } | Measure-Object | Select-Object -ExpandProperty Count)</div>
+            </div>
+            <div class="summary-box yellow">
+                <h3>Atributos Faltantes</h3>
+                <div class="big-number">$($results | Where-Object { $_.HasMissingAttributes -eq $true } | Measure-Object | Select-Object -ExpandProperty Count)</div>
+            </div>
+            <div class="summary-box yellow">
+                <h3>Encriptación Inválida</h3>
+                <div class="big-number">$($results | Where-Object { $_.ValidKerberosEncryption -eq $false } | Measure-Object | Select-Object -ExpandProperty Count)</div>
+            </div>
+            <div class="summary-box red">
+                <h3>SPNs Duplicados</h3>
+                <div class="big-number">$($results | Where-Object { $_.HasDuplicateSPNs -eq $true } | Measure-Object | Select-Object -ExpandProperty Count)</div>
+            </div>
         </div>
     </div>
 
     <div class="container">
         <h2>Resumen de Cuentas gMSA</h2>
-        <table>
-            <tr>
-                <th>Nombre</th>
-                <th>Habilitada</th>
-                <th>Tiene Contraseña</th>
-                <th>Equipos Autorizados</th>
-                <th>Nº Equipos</th>
-                <th>Equipos Existen</th>
-                <th>Equipos con Permisos</th>
-            </tr>
+        <div class="tab">
+            <button class="tablinks active" onclick="openTab(event, 'TabGeneral')">General</button>
+            <button class="tablinks" onclick="openTab(event, 'TabSeguridad')">Seguridad</button>
+            <button class="tablinks" onclick="openTab(event, 'TabConfiguracion')">Configuración</button>
+        </div>
+        
+        <div id="TabGeneral" class="tabcontent" style="display: block;">
+            <table>
+                <tr>
+                    <th>Nombre</th>
+                    <th>Habilitada</th>
+                    <th>Tiene Contraseña</th>
+                    <th>Equipos Autorizados</th>
+                    <th>Nº Equipos</th>
+                    <th>Equipos Existen</th>
+                    <th>Equipos con Permisos</th>
+                </tr>
 "@
 
 foreach ($result in $results) {
@@ -290,20 +483,83 @@ foreach ($result in $results) {
     $allPermissionClass = if ($result.AllAuthorizedComputersHavePermission) { "success" } else { "danger" }
     
     $htmlReport += @"
-            <tr>
-                <td>$($result.Name)</td>
-                <td class="$enabledClass">$($result.Enabled)</td>
-                <td class="$passwordClass">$($result.HasManagedPassword)</td>
-                <td class="$authComputersClass">$($result.HasAuthorizedComputers)</td>
-                <td>$($result.AuthorizedComputersCount)</td>
-                <td class="$allExistClass">$($result.AllAuthorizedComputersExist)</td>
-                <td class="$allPermissionClass">$($result.AllAuthorizedComputersHavePermission)</td>
-            </tr>
+                <tr>
+                    <td>$($result.Name)</td>
+                    <td class="$enabledClass">$($result.Enabled)</td>
+                    <td class="$passwordClass">$($result.HasManagedPassword)</td>
+                    <td class="$authComputersClass">$($result.HasAuthorizedComputers)</td>
+                    <td>$($result.AuthorizedComputersCount)</td>
+                    <td class="$allExistClass">$($result.AllAuthorizedComputersExist)</td>
+                    <td class="$allPermissionClass">$($result.AllAuthorizedComputersHavePermission)</td>
+                </tr>
 "@
 }
 
 $htmlReport += @"
-        </table>
+            </table>
+        </div>
+        
+        <div id="TabSeguridad" class="tabcontent">
+            <table>
+                <tr>
+                    <th>Nombre</th>
+                    <th>En Grupos Privilegiados</th>
+                    <th>Grupos Privilegiados</th>
+                    <th>Encriptación Válida</th>
+                    <th>SPNs Duplicados</th>
+                </tr>
+"@
+
+foreach ($result in $results) {
+    $privilegedClass = if ($result.InPrivilegedGroups) { "danger" } else { "success" }
+    $encryptionClass = if ($result.ValidKerberosEncryption) { "success" } else { "warning" }
+    $spnClass = if ($result.HasDuplicateSPNs) { "danger" } else { "success" }
+    
+    $htmlReport += @"
+                <tr>
+                    <td>$($result.Name)</td>
+                    <td class="$privilegedClass">$($result.InPrivilegedGroups)</td>
+                    <td>$(if ($result.PrivilegedGroupsList.Count -gt 0) { $result.PrivilegedGroupsList -join ", " } else { "Ninguno" })</td>
+                    <td class="$encryptionClass">$($result.ValidKerberosEncryption)</td>
+                    <td class="$spnClass">$($result.HasDuplicateSPNs)</td>
+                </tr>
+"@
+}
+
+$htmlReport += @"
+            </table>
+        </div>
+        
+        <div id="TabConfiguracion" class="tabcontent">
+            <table>
+                <tr>
+                    <th>Nombre</th>
+                    <th>Atributos Faltantes</th>
+                    <th>Lista Atributos Faltantes</th>
+                    <th>Config. Contraseña Correcta</th>
+                    <th>Contraseña No Expira</th>
+                </tr>
+"@
+
+foreach ($result in $results) {
+    $attributesClass = if ($result.HasMissingAttributes) { "warning" } else { "success" }
+    $passwordSettingsClass = if ($result.HasCorrectPasswordSettings) { "success" } else { "danger" }
+    $passwordExpiresClass = if ($result.PasswordNeverExpires) { "success" } else { "danger" }
+    
+    $htmlReport += @"
+                <tr>
+                    <td>$($result.Name)</td>
+                    <td class="$attributesClass">$($result.HasMissingAttributes)</td>
+                    <td>$(if ($result.MissingAttributes.Count -gt 0) { $result.MissingAttributes -join ", " } else { "Ninguno" })</td>
+                    <td class="$passwordSettingsClass">$($result.HasCorrectPasswordSettings)</td>
+                    <td class="$passwordExpiresClass">$($result.PasswordNeverExpires)</td>
+                </tr>
+"@
+}
+
+$htmlReport += @"
+            </table>
+        </div>
     </div>
 
     <div class="container">
@@ -311,20 +567,111 @@ $htmlReport += @"
 "@
 
 foreach ($result in $results) {
+    # Calcular el estado general de la cuenta
+    $statusBadges = @()
+    
+    if (-not $result.Enabled) {
+        $statusBadges += '<span class="badge badge-danger">Deshabilitada</span>'
+    }
+    if (-not $result.HasManagedPassword) {
+        $statusBadges += '<span class="badge badge-danger">Sin Contraseña</span>'
+    }
+    if (-not $result.HasAuthorizedComputers) {
+        $statusBadges += '<span class="badge badge-warning">Sin Equipos</span>'
+    }
+    if ($result.InPrivilegedGroups) {
+        $statusBadges += '<span class="badge badge-danger">Grupo Privilegiado</span>'
+    }
+    if ($result.HasMissingAttributes) {
+        $statusBadges += '<span class="badge badge-warning">Atributos Faltantes</span>'
+    }
+    if (-not $result.ValidKerberosEncryption) {
+        $statusBadges += '<span class="badge badge-warning">Encriptación Débil</span>'
+    }
+    if ($result.HasDuplicateSPNs) {
+        $statusBadges += '<span class="badge badge-danger">SPNs Duplicados</span>'
+    }
+    
+    $statusBadgesHtml = if ($statusBadges.Count -gt 0) { $statusBadges -join " " } else { '<span class="badge badge-success">OK</span>' }
+    
     $htmlReport += @"
-        <button class="accordion">$($result.Name) - $(if ($result.Enabled) { "Habilitada" } else { "Deshabilitada" })</button>
+        <button class="accordion">$($result.Name) - $statusBadgesHtml</button>
         <div class="panel">
-            <p><strong>Distinguished Name:</strong> $($result.DN)</p>
-            <p><strong>Habilitada:</strong> $($result.Enabled)</p>
-            <p><strong>Tiene Contraseña Gestionada:</strong> $($result.HasManagedPassword)</p>
-            <p><strong>Tiene Equipos Autorizados:</strong> $($result.HasAuthorizedComputers)</p>
-            <p><strong>Número de Equipos Autorizados:</strong> $($result.AuthorizedComputersCount)</p>
-            <p><strong>Todos los Equipos Autorizados Existen:</strong> $($result.AllAuthorizedComputersExist)</p>
-            <p><strong>Todos los Equipos Autorizados Tienen Permisos:</strong> $($result.AllAuthorizedComputersHavePermission)</p>
+            <div class="flex-container">
+                <div class="flex-item">
+                    <h3>Información General</h3>
+                    <p><strong>Distinguished Name:</strong> $($result.DN)</p>
+                    <p><strong>Habilitada:</strong> <span class="$(if ($result.Enabled) { "success" } else { "danger" })">$($result.Enabled)</span></p>
+                    <p><strong>Tiene Contraseña Gestionada:</strong> <span class="$(if ($result.HasManagedPassword) { "success" } else { "danger" })">$($result.HasManagedPassword)</span></p>
+                    <p><strong>Configuración de Contraseña Correcta:</strong> <span class="$(if ($result.HasCorrectPasswordSettings) { "success" } else { "danger" })">$($result.HasCorrectPasswordSettings)</span></p>
+                    <p><strong>Contraseña No Expira:</strong> <span class="$(if ($result.PasswordNeverExpires) { "success" } else { "danger" })">$($result.PasswordNeverExpires)</span></p>
+                </div>
+                
+                <div class="flex-item">
+                    <h3>Seguridad</h3>
+                    <p><strong>En Grupos Privilegiados:</strong> <span class="$(if ($result.InPrivilegedGroups) { "danger" } else { "success" })">$($result.InPrivilegedGroups)</span></p>
+                    <p><strong>Grupos Privilegiados:</strong> $(if ($result.PrivilegedGroupsList.Count -gt 0) { $result.PrivilegedGroupsList -join ", " } else { "Ninguno" })</p>
+                    <p><strong>Encriptación Kerberos Válida:</strong> <span class="$(if ($result.ValidKerberosEncryption) { "success" } else { "warning" })">$($result.ValidKerberosEncryption)</span></p>
+                    <p><strong>Tipo de Encriptación:</strong> $($result.KerberosEncryptionType)</p>
+                    <p><strong>SPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDuplicateSPNs)</span></p>
+                </div>
+            </div>
+            
+            <div class="flex-container">
+                <div class="flex-item">
+                    <h3>Atributos</h3>
+                    <p><strong>Atributos Faltantes:</strong> <span class="$(if ($result.HasMissingAttributes) { "warning" } else { "success" })">$($result.HasMissingAttributes)</span></p>
+                    <p><strong>Lista de Atributos Faltantes:</strong> $(if ($result.MissingAttributes.Count -gt 0) { $result.MissingAttributes -join ", " } else { "Ninguno" })</p>
+                    <h4>SPNs Configurados:</h4>
+                    <ul>
+"@
+
+    if ($null -ne $result.SPNs -and $result.SPNs.Count -gt 0) {
+        foreach ($spn in $result.SPNs) {
+            $spnClass = if ($result.DuplicateSPNs -contains $spn) { "danger" } else { "success" }
+            $htmlReport += @"
+                        <li class="$spnClass">$spn $(if ($result.DuplicateS
+            $htmlReport += @"
+                        <li class="$spnClass">$spn $(if ($result.DuplicateSPNs -contains $spn) { "<span class='badge badge-danger'>Duplicado</span>" } else { "" })</li>
+"@
+        }
+    } else {
+        $htmlReport += @"
+                        <li>No hay SPNs configurados</li>
+"@
+    }
+
+    $htmlReport += @"
+                    </ul>
+                </div>
+                
+                <div class="flex-item">
+                    <h3>Grupos</h3>
+                    <p><strong>Miembro de Grupos:</strong></p>
+                    <ul>
+"@
+
+    if ($result.MemberOfGroups.Count -gt 0) {
+        foreach ($group in $result.MemberOfGroups) {
+            $groupClass = if ($result.PrivilegedGroupsList -contains $group) { "danger" } else { "success" }
+            $htmlReport += @"
+                        <li class="$groupClass">$group $(if ($result.PrivilegedGroupsList -contains $group) { "<span class='badge badge-danger'>Privilegiado</span>" } else { "" })</li>
+"@
+        }
+    } else {
+        $htmlReport += @"
+                        <li>No es miembro de ningún grupo</li>
+"@
+    }
+
+    $htmlReport += @"
+                    </ul>
+                </div>
+            </div>
             
 "@
 
-    if ($result.HasAuthorizedComputers -and $result.AuthorizedComputers.Count -gt 0) {
+    if ($result.HasAuthorizedComputers) {
         $htmlReport += @"
             <h3>Equipos Autorizados</h3>
             <table>
@@ -358,6 +705,11 @@ foreach ($result in $results) {
         $htmlReport += @"
             </table>
 "@
+    } else {
+        $htmlReport += @"
+            <h3>Equipos Autorizados</h3>
+            <p class="warning">No hay equipos autorizados para recuperar la contraseña gestionada.</p>
+"@
     }
 
     $htmlReport += @"
@@ -383,13 +735,27 @@ $htmlReport += @"
                 }
             });
         }
+        
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tabcontent");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+            }
+            tablinks = document.getElementsByClassName("tablinks");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            document.getElementById(tabName).style.display = "block";
+            evt.currentTarget.className += " active";
+        }
     </script>
 </body>
 </html>
 "@
 
 # Guardar el informe HTML
-$htmlPath = "$env:USERPROFILE\Desktop\Informe_gMSA_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+$htmlPath = "$env:USERPROFILE\Desktop\Informe_Completo_gMSA_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
 $htmlReport | Out-File -FilePath $htmlPath -Encoding utf8
 Write-Host "Informe HTML generado en: $htmlPath" -ForegroundColor Green
 
