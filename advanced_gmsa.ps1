@@ -643,7 +643,7 @@ foreach ($result in $results) {
                     <p><strong>Grupos Privilegiados:</strong> $(if ($result.PrivilegedGroupsList.Count -gt 0) { $result.PrivilegedGroupsList -join ", " } else { "Ninguno" })</p>
                     <p><strong>Encriptación Kerberos Válida:</strong> <span class="$(if ($result.ValidKerberosEncryption) { "success" } else { "warning" })">$($result.ValidKerberosEncryption)</span></p>
                     <p><strong>Tipo de Encriptación:</strong> $($result.KerberosEncryptionType)</p>
-                    <p><strong>SPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDSPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDuplicateSPNs)</span></p>
+                    <p><strong>SPNs Duplicados:</strong> <span class="$(if ($result.HasDuplicateSPNs) { "danger" } else { "success" })">$($result.HasDuplicateSPNs)</span></p>
                 </div>
             </div>
             
