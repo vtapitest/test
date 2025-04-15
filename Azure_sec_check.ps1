@@ -8,7 +8,6 @@
     Requisitos:
     - Módulos MSOnline o AzureAD
     - Permisos básicos de lectura en Azure AD
-    Autor: v0
     Fecha: 15/04/2025
 #>
 
@@ -1160,80 +1159,128 @@ try {
                 Connect-MsolService -ErrorAction Stop
             }
             
-            # Obtener usuarios (limitado a 100 para evitar problemas de rendimiento)
-            Write-Log "Obteniendo usuarios para verificar MFA (limitado a 100)..." -Level "INFO"
-            $usersToCheck = @()
-            
-            # Usar un enfoque más controlado para obtener usuarios
-            try {
-                # Primero intentamos con un límite explícito
-                $usersToCheck = Get-MsolUser -MaxResults 100 -ErrorAction Stop | Where-Object { 
-                    $_.UserType -eq "Member" -and 
-                    ($usingAzureAD -or $_.BlockCredential -eq $false)
-                }
-            }
-            catch {
-                Write-Log "Error al obtener usuarios con MaxResults: $_" -Level "WARNING"
-                # Si falla, intentamos un enfoque alternativo
-                try {
-                    # Obtener solo usuarios activos
-                    $usersToCheck = Get-MsolUser -EnabledFilter EnabledOnly -MaxResults 100 -ErrorAction Stop | Where-Object {
-                        $_.UserType -eq "Member"
-                    }
-                }
-                catch {
-                    Write-Log "Error al obtener usuarios activos: $_" -Level "WARNING"
-                    # Último intento con parámetros mínimos
-                    try {
-                        $usersToCheck = Get-MsolUser -ErrorAction Stop | Select-Object -First 50
-                        Write-Log "Se obtuvieron usuarios con enfoque alternativo" -Level "INFO"
-                    }
-                    catch {
-                        Write-Log "No se pudieron obtener usuarios para verificar MFA: $_" -Level "ERROR"
-                        throw "No se pudieron obtener usuarios para verificar MFA"
-                    }
-                }
-            }
-            
+            # Inicializar contadores y listas
             $totalChecked = 0
             $usersWithoutMfa = 0
             $adminsWithoutMfa = 0
             $usersWithoutMfaList = @()
             
-            Write-Log "Procesando $($usersToCheck.Count) usuarios para verificar MFA..." -Level "INFO"
+            # Implementar procesamiento por lotes para evitar errores de pipeline
+            Write-Log "Obteniendo todos los usuarios para verificar MFA (procesamiento por lotes)..." -Level "INFO"
             
-            foreach ($user in $usersToCheck) {
-                $totalChecked++
+            # Primero obtenemos solo los IDs y UPNs para minimizar la carga de memoria
+            $allUserIds = @()
+            try {
+                # Obtener solo usuarios miembros activos
+                Write-Log "Obteniendo lista de usuarios miembros activos..." -Level "INFO"
+                $allUserIds = Get-MsolUser -All -EnabledFilter EnabledOnly | 
+                    Where-Object { $_.UserType -eq "Member" } | 
+                    Select-Object -Property ObjectId, UserPrincipalName
                 
-                # Verificar estado de MFA
-                $mfaStatus = $user.StrongAuthenticationRequirements
-                $mfaEnabled = ($mfaStatus -ne $null -and $mfaStatus.Count -gt 0) -or 
-                              ($securityDefaultsEnabled -eq $true)
-                
-                if (-not $mfaEnabled) {
-                    $usersWithoutMfa++
+                Write-Log "Se encontraron $($allUserIds.Count) usuarios miembros activos" -Level "INFO"
+            }
+            catch {
+                Write-Log "Error al obtener lista completa de usuarios: $_" -Level "WARNING"
+                # Plan B: Intentar con un enfoque más limitado
+                try {
+                    Write-Log "Intentando obtener usuarios con enfoque alternativo..." -Level "INFO"
+                    $allUserIds = Get-MsolUser -MaxResults 1000 | 
+                        Where-Object { $_.UserType -eq "Member" -and (-not $_.BlockCredential) } | 
+                        Select-Object -Property ObjectId, UserPrincipalName
                     
-                    # Verificar si es administrador
-                    $isAdmin = $false
+                    Write-Log "Se encontraron $($allUserIds.Count) usuarios con enfoque alternativo" -Level "INFO"
+                }
+                catch {
+                    Write-Log "Error al obtener usuarios con enfoque alternativo: $_" -Level "ERROR"
+                    throw "No se pudieron obtener usuarios para verificar MFA"
+                }
+            }
+            
+            # Tamaño del lote - procesar usuarios en grupos pequeños
+            $batchSize = 50
+            $totalBatches = [Math]::Ceiling($allUserIds.Count / $batchSize)
+            
+            Write-Log "Procesando $($allUserIds.Count) usuarios en $totalBatches lotes de $batchSize usuarios cada uno..." -Level "INFO"
+            
+            # Procesar usuarios por lotes
+            for ($batchIndex = 0; $batchIndex -lt $totalBatches; $batchIndex++) {
+                $startIndex = $batchIndex * $batchSize
+                $endIndex = [Math]::Min(($batchIndex + 1) * $batchSize - 1, $allUserIds.Count - 1)
+                $currentBatchSize = $endIndex - $startIndex + 1
+                
+                Write-Log "Procesando lote $($batchIndex + 1) de $totalBatches ($currentBatchSize usuarios)..." -Level "INFO"
+                
+                # Obtener el lote actual de usuarios
+                $currentBatch = $allUserIds[$startIndex..$endIndex]
+                
+                # Procesar cada usuario en el lote actual
+                foreach ($userBasic in $currentBatch) {
                     try {
-                        # Usar Get-MsolUserRole con el parámetro UserPrincipalName para evitar errores
-                        $userRoles = Get-MsolUserRole -UserPrincipalName $user.UserPrincipalName -ErrorAction SilentlyContinue
-                        if ($userRoles -and $userRoles.Count -gt 0) {
-                            $isAdmin = $true
-                            $adminsWithoutMfa++
+                        # Obtener detalles completos del usuario uno por uno para evitar sobrecarga
+                        $user = Get-MsolUser -ObjectId $userBasic.ObjectId -ErrorAction Stop
+                        $totalChecked++
+                        
+                        # Verificar estado de MFA
+                        $mfaStatus = $user.StrongAuthenticationRequirements
+                        $mfaEnabled = ($mfaStatus -ne $null -and $mfaStatus.Count -gt 0) -or 
+                                      ($securityDefaultsEnabled -eq $true)
+                        
+                        if (-not $mfaEnabled) {
+                            $usersWithoutMfa++
+                            
+                            # Verificar si es administrador - con manejo de errores mejorado
+                            $isAdmin = $false
+                            try {
+                                # Usar Get-MsolUserRole con el parámetro UserPrincipalName para evitar errores
+                                $userRoles = Get-MsolUserRole -UserPrincipalName $user.UserPrincipalName -ErrorAction Stop
+                                if ($userRoles -and $userRoles.Count -gt 0) {
+                                    $isAdmin = $true
+                                    $adminsWithoutMfa++
+                                }
+                            }
+                            catch {
+                                Write-Log "Error al verificar roles para $($user.UserPrincipalName): $_" -Level "WARNING"
+                                # Intentar un enfoque alternativo para verificar si es admin
+                                try {
+                                    $userRoles = Get-MsolUserRole -ObjectId $user.ObjectId -ErrorAction SilentlyContinue
+                                    if ($userRoles -and $userRoles.Count -gt 0) {
+                                        $isAdmin = $true
+                                        $adminsWithoutMfa++
+                                    }
+                                }
+                                catch {
+                                    Write-Log "Error al verificar roles por ObjectId para $($user.UserPrincipalName): $_" -Level "WARNING"
+                                }
+                            }
+                            
+                            # Solo guardar los primeros 100 usuarios sin MFA para no sobrecargar el informe
+                            if ($usersWithoutMfaList.Count -lt 100) {
+                                $usersWithoutMfaList += [PSCustomObject]@{
+                                    DisplayName = $user.DisplayName
+                                    UserPrincipalName = $user.UserPrincipalName
+                                    IsAdmin = $isAdmin
+                                }
+                            }
+                        }
+                        
+                        # Mostrar progreso cada 100 usuarios
+                        if ($totalChecked % 100 -eq 0) {
+                            Write-Log "Progreso: $totalChecked usuarios procesados..." -Level "INFO"
                         }
                     }
                     catch {
-                        Write-Log "Error al verificar roles para $($user.UserPrincipalName): $_" -Level "WARNING"
-                    }
-                    
-                    $usersWithoutMfaList += [PSCustomObject]@{
-                        DisplayName = $user.DisplayName
-                        UserPrincipalName = $user.UserPrincipalName
-                        IsAdmin = $isAdmin
+                        Write-Log "Error al procesar usuario $($userBasic.UserPrincipalName): $_" -Level "WARNING"
+                        # Continuar con el siguiente usuario
                     }
                 }
+                
+                # Pequeña pausa entre lotes para no sobrecargar la API
+                if ($batchIndex -lt $totalBatches - 1) {
+                    Start-Sleep -Milliseconds 500
+                }
             }
+            
+            Write-Log "Análisis de MFA completado. Total procesado: $totalChecked usuarios" -Level "INFO"
             
             # Añadir estadísticas de MFA
             if ($totalChecked -gt 0) {
@@ -1244,7 +1291,7 @@ try {
                     <div class="summary-card">
                         <h3>Usuarios Verificados</h3>
                         <div class="stat">$totalChecked</div>
-                        <div class="description">Número de usuarios analizados</div>
+                        <div class="description">Número total de usuarios analizados</div>
                     </div>
                     <div class="summary-card">
                         <h3>Usuarios sin MFA</h3>
@@ -1296,11 +1343,22 @@ try {
 "@
                 }
                 
-                # Mostrar lista de usuarios sin MFA
+                # Mostrar lista de usuarios sin MFA (limitado a 100 para no sobrecargar el informe)
                 if ($usersWithoutMfaList.Count -gt 0) {
                     $mfaSection += @"
                 <div class="divider"></div>
                 <h3>Usuarios sin MFA configurado</h3>
+"@
+
+                    if ($usersWithoutMfa > 100) {
+                        $mfaSection += @"
+                <div class="info-box">
+                    <span class="info-icon">ℹ️</span> Se muestran solo los primeros 100 usuarios sin MFA de un total de $usersWithoutMfa.
+                </div>
+"@
+                    }
+
+                    $mfaSection += @"
                 <table>
                     <tr>
                         <th>Nombre</th>
