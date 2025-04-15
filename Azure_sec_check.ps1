@@ -485,6 +485,16 @@ $htmlHeader = @"
                 grid-template-columns: 1fr;
             }
         }
+
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
@@ -1066,6 +1076,18 @@ try {
     <div id="mfa" class="section">
         <h2>Configuración de MFA</h2>
         <div class="section-content">
+            <div class="info-box" style="background-color: #f0f7ff; border-left: 4px solid #0078d4; padding: 15px; margin-bottom: 20px;">
+                <span class="info-icon">ℹ️</span> <strong>Limitaciones importantes en la verificación de MFA:</strong><br>
+                Este informe utiliza el módulo MSOnline para verificar el estado de MFA, lo cual tiene limitaciones significativas:<br>
+                <ul style="margin-top: 10px; margin-left: 25px;">
+                    <li>No puede detectar con precisión todos los métodos de MFA habilitados</li>
+                    <li>No detecta correctamente MFA habilitado a través de políticas de acceso condicional</li>
+                    <li>No muestra si el usuario ha registrado métodos de autenticación específicos</li>
+                    <li>Puede no reflejar correctamente el estado de MFA habilitado por Security Defaults</li>
+                </ul>
+                Para una verificación completa y precisa del estado de MFA, se recomienda utilizar Microsoft Graph API,
+                que proporciona información detallada sobre los métodos de autenticación registrados y las políticas aplicadas.
+            </div>
 "@
     
     # Verificar si los valores predeterminados de seguridad están habilitados
@@ -1229,8 +1251,11 @@ try {
                 
                 Write-Log "Procesando lote $($batchIndex + 1) de $totalBatches ($currentBatchSize usuarios)..." -Level "INFO"
                 
-                # Obtener el lote actual de usuarios
-                $currentBatch = $allUserIds[$startIndex..$endIndex]
+                # Obtener el lote actual de usuarios (método alternativo para evitar problemas de permisos)
+                $currentBatch = @()
+                for ($i = $startIndex; $i -le $endIndex; $i++) {
+                    $currentBatch += $allUserIds[$i]
+                }
                 
                 # Procesar cada usuario en el lote actual
                 foreach ($userBasic in $currentBatch) {
@@ -1482,6 +1507,46 @@ try {
 "@
     }
     
+    # Añadir sección sobre cómo verificar MFA con Microsoft Graph
+    $mfaSection += @"
+        <div class="divider"></div>
+        <h3>Verificación avanzada de MFA con Microsoft Graph</h3>
+        <div class="info-box" style="background-color: #e7f6e7; border-left: 4px solid #107c10;">
+            <span class="info-icon">💡</span> <strong>Recomendación para verificación precisa de MFA:</strong><br>
+            Para obtener información completa y precisa sobre el estado de MFA de los usuarios, se recomienda utilizar Microsoft Graph API.
+            A continuación se muestra un ejemplo de cómo podría implementarse:
+            <pre style="background-color: #f5f5f5; padding: 10px; margin-top: 10px; border-radius: 4px; overflow-x: auto;">
+# Requiere los módulos Microsoft.Graph.Authentication y Microsoft.Graph.Users
+Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Users -Scope CurrentUser
+
+# Conectar a Microsoft Graph con los permisos necesarios
+Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All"
+
+# Obtener información de autenticación de usuarios
+$users = Get-MgUser -All -Property Id,DisplayName,UserPrincipalName
+foreach ($user in $users) {
+    $authMethods = Get-MgUserAuthenticationMethod -UserId $user.Id
+    
+    # Verificar si tiene métodos MFA registrados
+    $hasMfaMethods = $authMethods | Where-Object {
+        $_."@odata.type" -in @(
+            "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod",
+            "#microsoft.graph.phoneAuthenticationMethod",
+            "#microsoft.graph.fido2AuthenticationMethod",
+            "#microsoft.graph.softwareOathAuthenticationMethod"
+        )
+    }
+    
+    if ($hasMfaMethods) {
+        Write-Host "$($user.DisplayName) tiene MFA configurado"
+    } else {
+        Write-Host "$($user.DisplayName) NO tiene MFA configurado"
+    }
+}
+            </pre>
+        </div>
+"@
+    
     $mfaSection += @"
         </div>
     </div>
@@ -1498,6 +1563,9 @@ catch {
         <div class="section-content">
             <div class="alert">
                 <span class="alert-icon">⚠️</span> Error al obtener información de MFA: $_
+            </div>
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> Para una verificación precisa del estado de MFA, se recomienda utilizar Microsoft Graph API en lugar de los módulos MSOnline o AzureAD.
             </div>
         </div>
     </div>
