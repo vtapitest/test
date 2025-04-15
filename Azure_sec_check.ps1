@@ -257,7 +257,7 @@ $htmlHeader = @"
         }
 
         .section h2::after {
-            content: "\u25BC";
+            content: "▼";
             margin-left: 10px;
             font-size: 12px;
             transition: transform 0.3s;
@@ -525,6 +525,21 @@ $htmlContent = ""
 
 # Verificar módulos disponibles
 $moduleFound = $false
+$msolineAvailable = $false
+
+# Comprobar si MSOnline está disponible
+if (Get-Module -ListAvailable -Name MSOnline) {
+    $msolineAvailable = $true
+    Write-Log "Módulo MSOnline disponible" -Level "INFO"
+    
+    # Si solo está disponible MSOnline, lo usamos como principal
+    if (-not (Get-Module -ListAvailable -Name AzureAD)) {
+        Write-Log "Usando módulo MSOnline para la auditoría" -Level "INFO"
+        Import-Module MSOnline
+        $moduleFound = $true
+        $usingAzureAD = $false
+    }
+}
 
 # Comprobar si AzureAD está disponible
 if (Get-Module -ListAvailable -Name AzureAD) {
@@ -532,13 +547,12 @@ if (Get-Module -ListAvailable -Name AzureAD) {
     Import-Module AzureAD
     $moduleFound = $true
     $usingAzureAD = $true
-}
-# Comprobar si MSOnline está disponible
-elseif (Get-Module -ListAvailable -Name MSOnline) {
-    Write-Log "Usando módulo MSOnline para la auditoría" -Level "INFO"
-    Import-Module MSOnline
-    $moduleFound = $true
-    $usingAzureAD = $false
+    
+    # Si también está disponible MSOnline, lo cargamos como complemento
+    if ($msolineAvailable) {
+        Write-Log "Cargando también MSOnline para funcionalidades adicionales" -Level "INFO"
+        Import-Module MSOnline
+    }
 }
 
 if (-not $moduleFound) {
@@ -549,19 +563,20 @@ if (-not $moduleFound) {
 }
 
 # Intentar instalar el módulo que falta
-if ($usingAzureAD -and -not (Get-Module -ListAvailable -Name MSOnline)) {
+if ($usingAzureAD -and -not $msolineAvailable) {
     try {
-        Write-Log "Intentando instalar el módulo MSOnline como respaldo..." -Level "INFO"
+        Write-Log "Intentando instalar el módulo MSOnline como complemento..." -Level "INFO"
         Install-Module -Name MSOnline -Force -AllowClobber -Scope CurrentUser -ErrorAction SilentlyContinue
         Import-Module MSOnline -ErrorAction SilentlyContinue
+        $msolineAvailable = $true
     }
     catch {
         Write-Log "No se pudo instalar el módulo MSOnline: $_" -Level "WARNING"
     }
 }
-elseif (-not $usingAzureAD -and -not (Get-Module -ListAvailable -Name AzureAD)) {
+elseif (-not $usingAzureAD) {
     try {
-        Write-Log "Intentando instalar el módulo AzureAD como respaldo..." -Level "INFO"
+        Write-Log "Intentando instalar el módulo AzureAD como complemento..." -Level "INFO"
         Install-Module -Name AzureAD -Force -AllowClobber -Scope CurrentUser -ErrorAction SilentlyContinue
         Import-Module AzureAD -ErrorAction SilentlyContinue
     }
@@ -586,6 +601,17 @@ try {
         $tenantName = $tenantDetails.DisplayName
         $tenantId = $tenantDetails.ObjectId
         $verifiedDomains = (Get-AzureADDomain | Where-Object { $_.IsVerified -eq $true }).Count
+        
+        # Si también tenemos MSOnline disponible, conectamos para funcionalidades adicionales
+        if ($msolineAvailable) {
+            try {
+                Connect-MsolService -ErrorAction SilentlyContinue
+                Write-Log "Conexión a MSOnline establecida correctamente (para funcionalidades adicionales)" -Level "INFO"
+            }
+            catch {
+                Write-Log "No se pudo conectar a MSOnline: $_" -Level "WARNING"
+            }
+        }
     }
     else {
         Connect-MsolService -ErrorAction Stop
@@ -844,9 +870,6 @@ try {
                 if ($isCritical) {
                     $rolesSection += @"
                     <div class="alert">
-                          {
-                    $rolesSection += @"
-                    <div class="alert">
                         <span class="alert-icon">⚠️</span> Este es un rol crítico con altos privilegios
                     </div>
 "@
@@ -1032,48 +1055,49 @@ try {
     $securityDefaultsEnabled = $false
     $securityDefaultsStatus = "No se pudo determinar"
 
+    # Intentar determinar el estado de Security Defaults
     try {
-        # Intentar determinar el estado de Security Defaults indirectamente
-        # Verificamos si hay políticas de acceso condicional, lo que suele indicar que Security Defaults está deshabilitado
-        $hasConditionalAccessPolicies = $false
-        
-        if ($usingAzureAD) {
+        # Primero intentamos con MSOnline si está disponible
+        if ($msolineAvailable) {
             try {
-                # Intentar obtener políticas de acceso condicional si es posible
-                $conditionalAccessPolicies = Get-AzureADMSConditionalAccessPolicy -ErrorAction SilentlyContinue
-                if ($conditionalAccessPolicies -and $conditionalAccessPolicies.Count -gt 0) {
-                    $hasConditionalAccessPolicies = $true
+                # Verificar si hay usuarios con MFA forzado, lo que podría indicar Security Defaults
+                $sampleUsers = Get-MsolUser -MaxResults 20 | Where-Object { 
+                    $_.UserType -eq "Member" -and 
+                    ($usingAzureAD -or $_.BlockCredential -eq $false)
+                }
+                
+                $mfaEnforcedCount = 0
+                foreach ($user in $sampleUsers) {
+                    if ($user.StrongAuthenticationRequirements -and $user.StrongAuthenticationRequirements.Count -gt 0) {
+                        $mfaEnforcedCount++
+                    }
+                }
+                
+                # Si más del 80% de los usuarios tienen MFA forzado, probablemente Security Defaults está habilitado
+                if ($sampleUsers.Count -gt 0 -and ($mfaEnforcedCount / $sampleUsers.Count) -gt 0.8) {
+                    $securityDefaultsEnabled = $true
+                    $securityDefaultsStatus = "Probablemente habilitados"
+                }
+                else {
+                    # Verificar si hay políticas de acceso condicional, lo que suele indicar que Security Defaults está deshabilitado
+                    $hasConditionalAccessPolicies = $false
+                    if ($conditionalAccessPolicies -and $conditionalAccessPolicies.Count -gt 0) {
+                        $hasConditionalAccessPolicies = $true
+                        $securityDefaultsEnabled = $false
+                        $securityDefaultsStatus = "Probablemente deshabilitados (se detectaron políticas de acceso condicional)"
+                    }
+                    else {
+                        $securityDefaultsStatus = "No se pudo determinar con certeza"
+                    }
                 }
             }
             catch {
-                Write-Log "No se pudieron verificar las políticas de acceso condicional: $_" -Level "WARNING"
+                Write-Log "Error al verificar estado de MFA con MSOnline: $_" -Level "WARNING"
+                $securityDefaultsStatus = "No se pudo determinar"
             }
         }
-        
-        # Verificar si hay usuarios con MFA forzado, lo que podría indicar Security Defaults o políticas personalizadas
-        $mfaEnforcedCount = 0
-        
-        if (Get-Command Get-MsolUser -ErrorAction SilentlyContinue) {
-            $sampleUsers = Get-MsolUser -MaxResults 20 | Where-Object { $_.UserType -eq "Member" -and $_.BlockCredential -eq $false }
-            
-            foreach ($user in $sampleUsers) {
-                if ($user.StrongAuthenticationRequirements -and $user.StrongAuthenticationRequirements.Count -gt 0) {
-                    $mfaEnforcedCount++
-                }
-            }
-            
-            # Si más del 80% de los usuarios tienen MFA forzado, probablemente Security Defaults está habilitado
-            if ($sampleUsers.Count -gt 0 -and ($mfaEnforcedCount / $sampleUsers.Count) -gt 0.8) {
-                $securityDefaultsEnabled = $true
-                $securityDefaultsStatus = "Probablemente habilitados"
-            }
-            elseif ($hasConditionalAccessPolicies) {
-                $securityDefaultsEnabled = $false
-                $securityDefaultsStatus = "Probablemente deshabilitados (se detectaron políticas de acceso condicional)"
-            }
-            else {
-                $securityDefaultsStatus = "No se pudo determinar con certeza"
-            }
+        else {
+            $securityDefaultsStatus = "No se pudo determinar (MSOnline no disponible)"
         }
         
         $mfaSection += @"
@@ -1128,22 +1152,7 @@ try {
 "@
     
     # Verificar si tenemos el módulo MSOnline disponible para verificar MFA
-    $canCheckMFA = $false
-    if (Get-Module -ListAvailable -Name MSOnline) {
-        try {
-            # Intentar importar MSOnline si no está ya cargado
-            if (-not (Get-Module -Name MSOnline)) {
-                Import-Module MSOnline -ErrorAction Stop
-            }
-            $canCheckMFA = $true
-        }
-        catch {
-            Write-Log "No se pudo cargar el módulo MSOnline para verificar MFA: $_" -Level "WARNING"
-            $canCheckMFA = $false
-        }
-    }
-    
-    if ($canCheckMFA) {
+    if ($msolineAvailable) {
         try {
             # Asegurarse de que estamos conectados a MSOnline
             if (-not (Get-MsolCompanyInformation -ErrorAction SilentlyContinue)) {
@@ -1152,9 +1161,10 @@ try {
             }
             
             # Obtener usuarios (limitado a 100 para evitar problemas de rendimiento)
-            $usersToCheck = Get-MsolUser -All -MaxResults 100 | Where-Object { 
-                $_.UserType -eq "Member" -and $_.BlockCredential -eq $false 
-            }
+            $usersToCheck = Get-MsolUser -All | Where-Object { 
+                $_.UserType -eq "Member" -and 
+                ($usingAzureAD -or $_.BlockCredential -eq $false)
+            } | Select-Object -First 100
             
             $totalChecked = 0
             $usersWithoutMfa = 0
@@ -1175,7 +1185,8 @@ try {
                     # Verificar si es administrador
                     $isAdmin = $false
                     try {
-                        $userRoles = Get-MsolUserRole -UserPrincipalObjectId $user.ObjectId -ErrorAction SilentlyContinue
+                        # Usar Get-MsolUserRole sin parámetros adicionales para evitar el error de parameter set
+                        $userRoles = Get-MsolUserRole -UserPrincipalName $user.UserPrincipalName -ErrorAction SilentlyContinue
                         if ($userRoles -and $userRoles.Count -gt 0) {
                             $isAdmin = $true
                             $adminsWithoutMfa++
@@ -1585,72 +1596,91 @@ try {
         </div>
 "@
     
-    # Verificar configuración de contraseñas
-    if (-not $usingAzureAD) {
+    # Verificar configuración de contraseñas usando MSOnline si está disponible
+    if ($msolineAvailable) {
         try {
-            $passwordPolicy = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain -ErrorAction Stop
+            # Obtener el dominio inicial
+            $initialDomain = $null
+            if ($usingAzureAD) {
+                $domains = Get-AzureADDomain
+                $initialDomain = ($domains | Where-Object { $_.IsInitial -eq $true }).Name
+            }
+            else {
+                $domains = Get-MsolDomain
+                $initialDomain = ($domains | Where-Object { $_.IsInitial -eq $true }).Name
+            }
             
-            $seguridadSection += @"
-            <div class="divider"></div>
-            <h3>Política de Contraseñas</h3>
-            <table>
-                <tr>
-                    <th>Configuración</th>
-                    <th>Valor</th>
-                </tr>
-                <tr>
-                    <td>Validez de contraseña</td>
-                    <td>$($passwordPolicy.ValidityPeriod) $($passwordPolicy.ValidityPeriodType)</td>
-                </tr>
-                <tr>
-                    <td>Notificación previa a expiración</td>
-                    <td>$($passwordPolicy.NotificationDays) días</td>
-                </tr>
-"@
-            
-            # Obtener configuración de complejidad de contraseñas
-            try {
-                $strongPasswordRequired = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain | 
-                    Select-Object -ExpandProperty StrongPasswordRequired -ErrorAction Stop
+            if ($initialDomain) {
+                $passwordPolicy = Get-MsolPasswordPolicy -Domain $initialDomain -ErrorAction Stop
                 
                 $seguridadSection += @"
-                <tr>
-                    <td>Contraseñas seguras requeridas</td>
-                    <td>$strongPasswordRequired</td>
-                </tr>
+                <div class="divider"></div>
+                <h3>Política de Contraseñas</h3>
+                <table>
+                    <tr>
+                        <th>Configuración</th>
+                        <th>Valor</th>
+                    </tr>
+                    <tr>
+                        <td>Validez de contraseña</td>
+                        <td>$($passwordPolicy.ValidityPeriod) $($passwordPolicy.ValidityPeriodType)</td>
+                    </tr>
+                    <tr>
+                        <td>Notificación previa a expiración</td>
+                        <td>$($passwordPolicy.NotificationDays) días</td>
+                    </tr>
 "@
-            }
-            catch {
-                $seguridadSection += @"
-                <tr>
-                    <td>Contraseñas seguras requeridas</td>
-                    <td>Error al obtener información</td>
-                </tr>
+                
+                # Obtener configuración de complejidad de contraseñas
+                try {
+                    $strongPasswordRequired = $passwordPolicy.StrongPasswordRequired
+                    
+                    $seguridadSection += @"
+                    <tr>
+                        <td>Contraseñas seguras requeridas</td>
+                        <td>$strongPasswordRequired</td>
+                    </tr>
 "@
-            }
-            
-            $seguridadSection += "</table>"
-            
-            if ($passwordPolicy.ValidityPeriod -eq 0) {
-                $seguridadSection += @"
-            <div class="success">
-                <span class="success-icon">✓</span> BUENA PRÁCTICA: Las contraseñas no expiran (política moderna de contraseñas)
-            </div>
+                }
+                catch {
+                    $seguridadSection += @"
+                    <tr>
+                        <td>Contraseñas seguras requeridas</td>
+                        <td>Error al obtener información</td>
+                    </tr>
 "@
-            }
-            elseif ($passwordPolicy.ValidityPeriod -gt 90) {
-                $seguridadSection += @"
-            <div class="alert">
-                <span class="alert-icon">⚠️</span> ALERTA: El período de validez de contraseñas es superior a 90 días
-            </div>
+                }
+                
+                $seguridadSection += "</table>"
+                
+                if ($passwordPolicy.ValidityPeriod -eq 0) {
+                    $seguridadSection += @"
+                <div class="success">
+                    <span class="success-icon">✓</span> BUENA PRÁCTICA: Las contraseñas no expiran (política moderna de contraseñas)
+                </div>
 "@
+                }
+                elseif ($passwordPolicy.ValidityPeriod -gt 90) {
+                    $seguridadSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA: El período de validez de contraseñas es superior a 90 días
+                </div>
+"@
+                }
+                
+                if (-not $strongPasswordRequired) {
+                    $seguridadSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA: No se requieren contraseñas seguras
+                </div>
+"@
+                }
             }
-            
-            if (-not $strongPasswordRequired) {
+            else {
                 $seguridadSection += @"
-            <div class="alert">
-                <span class="alert-icon">⚠️</span> ALERTA: No se requieren contraseñas seguras
-            </div>
+                <div class="info-box">
+                    <span class="info-icon">ℹ️</span> No se pudo determinar el dominio inicial para verificar la política de contraseñas.
+                </div>
 "@
             }
         }
@@ -1666,7 +1696,7 @@ try {
     else {
         $seguridadSection += @"
         <div class="info-box">
-            <span class="info-icon">ℹ️</span> La información detallada sobre políticas de contraseñas no está disponible con el módulo AzureAD estándar. Para obtener esta información, utilice el módulo MSOnline.
+            <span class="info-icon">ℹ️</span> La información detallada sobre políticas de contraseñas no está disponible porque el módulo MSOnline no está disponible. Para obtener esta información, instale el módulo MSOnline.
         </div>
 "@
     }
@@ -1819,6 +1849,10 @@ $fullHtml = $htmlHeader + $htmlContent + $htmlFooter
 # Desconectar sesiones
 if ($usingAzureAD) {
     Disconnect-AzureAD -ErrorAction SilentlyContinue
+}
+if ($msolineAvailable) {
+    # No hay un cmdlet específico para desconectar MSOnline, pero podemos limpiar la sesión
+    [Microsoft.Online.Administration.Automation.ConnectMsolService]::ClearUserSessionState() -ErrorAction SilentlyContinue
 }
 
 Write-Log "Reporte HTML generado correctamente en: $reportFile" -Level "INFO"
