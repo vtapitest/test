@@ -1507,46 +1507,6 @@ try {
 "@
     }
     
-    # Añadir sección sobre cómo verificar MFA con Microsoft Graph
-    $mfaSection += @"
-        <div class="divider"></div>
-        <h3>Verificación avanzada de MFA con Microsoft Graph</h3>
-        <div class="info-box" style="background-color: #e7f6e7; border-left: 4px solid #107c10;">
-            <span class="info-icon">💡</span> <strong>Recomendación para verificación precisa de MFA:</strong><br>
-            Para obtener información completa y precisa sobre el estado de MFA de los usuarios, se recomienda utilizar Microsoft Graph API.
-            A continuación se muestra un ejemplo de cómo podría implementarse:
-            <pre style="background-color: #f5f5f5; padding: 10px; margin-top: 10px; border-radius: 4px; overflow-x: auto;">
-# Requiere los módulos Microsoft.Graph.Authentication y Microsoft.Graph.Users
-Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Users -Scope CurrentUser
-
-# Conectar a Microsoft Graph con los permisos necesarios
-Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All"
-
-# Obtener información de autenticación de usuarios
-$users = Get-MgUser -All -Property Id,DisplayName,UserPrincipalName
-foreach ($user in $users) {
-    $authMethods = Get-MgUserAuthenticationMethod -UserId $user.Id
-    
-    # Verificar si tiene métodos MFA registrados
-    $hasMfaMethods = $authMethods | Where-Object {
-        $_."@odata.type" -in @(
-            "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod",
-            "#microsoft.graph.phoneAuthenticationMethod",
-            "#microsoft.graph.fido2AuthenticationMethod",
-            "#microsoft.graph.softwareOathAuthenticationMethod"
-        )
-    }
-    
-    if ($hasMfaMethods) {
-        Write-Host "$($user.DisplayName) tiene MFA configurado"
-    } else {
-        Write-Host "$($user.DisplayName) NO tiene MFA configurado"
-    }
-}
-            </pre>
-        </div>
-"@
-    
     $mfaSection += @"
         </div>
     </div>
