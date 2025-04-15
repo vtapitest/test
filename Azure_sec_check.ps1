@@ -1,14 +1,15 @@
 <#
 .SYNOPSIS
-    Script de auditoría de seguridad para entornos Azure.
+    Script de auditoría de seguridad para Microsoft Entra ID (Azure AD) sin requerir suscripción completa de Azure.
 .DESCRIPTION
-    Este script realiza una auditoría de seguridad completa en un entorno Azure,
-    incluyendo revisión de roles, políticas de acceso condicional, configuración de MFA,
-    alertas de seguridad, configuraciones de recursos y aplicaciones expuestas.
+    Este script realiza una auditoría de seguridad básica en Microsoft Entra ID,
+    incluyendo revisión de usuarios, roles, políticas de acceso condicional, configuración de MFA,
+    y aplicaciones registradas.
 .NOTES
     Requisitos:
-    - Módulos Az, Microsoft.Graph, Az.SecurityCenter
-    - Roles de Security Administrator y Global Reader
+    - Módulos Microsoft.Graph.Authentication, Microsoft.Graph.Identity.DirectoryManagement, 
+      Microsoft.Graph.Identity.SignIns, Microsoft.Graph.Applications
+    - Permisos de lectura en Entra ID (Azure AD)
     Autor: v0
     Fecha: 15/04/2025
 #>
@@ -19,13 +20,13 @@ $ErrorActionPreference = "Continue"
 $WarningPreference = "SilentlyContinue"
 
 # Crear carpeta para el reporte si no existe
-$reportFolder = "$env:USERPROFILE\AzureSecurityAudit"
+$reportFolder = "$env:USERPROFILE\EntraIDSecurityAudit"
 if (-not (Test-Path -Path $reportFolder)) {
     New-Item -ItemType Directory -Path $reportFolder | Out-Null
 }
 
-$reportFile = "$reportFolder\SecurityAuditReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-$logFile = "$reportFolder\SecurityAuditLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$reportFile = "$reportFolder\EntraIDSecurityAuditReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$logFile = "$reportFolder\EntraIDSecurityAuditLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 
 # Función para escribir en el reporte
 function Write-Report {
@@ -68,7 +69,13 @@ function Write-Log {
 }
 
 # Verificar módulos requeridos
-$requiredModules = @("Az.Accounts", "Az.Resources", "Az.Security", "Az.Storage", "Az.Network", "Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.SignIns")
+$requiredModules = @(
+    "Microsoft.Graph.Authentication", 
+    "Microsoft.Graph.Identity.DirectoryManagement", 
+    "Microsoft.Graph.Identity.SignIns", 
+    "Microsoft.Graph.Applications",
+    "Microsoft.Graph.Users"
+)
 
 foreach ($module in $requiredModules) {
     if (-not (Get-Module -ListAvailable -Name $module)) {
@@ -86,104 +93,131 @@ foreach ($module in $requiredModules) {
 }
 #endregion
 
-#region 1. Autenticación y Contexto
-Write-Log "Iniciando auditoría de seguridad de Azure..." -Level "INFO"
-Write-Log "1. Autenticación y selección de contexto" -Level "INFO"
+#region 1. Autenticación con Microsoft Graph
+Write-Log "Iniciando auditoría de seguridad de Microsoft Entra ID..." -Level "INFO"
+Write-Log "1. Autenticación con Microsoft Graph" -Level "INFO"
 
 try {
-    # Conectar a Azure
-    Connect-AzAccount -ErrorAction Stop
-    Write-Log "Conexión a Azure establecida correctamente" -Level "INFO"
+    # Conectar a Microsoft Graph
+    Connect-MgGraph -Scopes @(
+        "Directory.Read.All", 
+        "Policy.Read.All", 
+        "AuditLog.Read.All", 
+        "IdentityRiskyUser.Read.All", 
+        "Application.Read.All",
+        "User.Read.All"
+    ) -ErrorAction Stop
     
-    # Obtener todas las suscripciones
-    $subscriptions = Get-AzSubscription
+    Write-Log "Conexión a Microsoft Graph establecida correctamente" -Level "INFO"
     
-    if ($subscriptions.Count -eq 0) {
-        Write-Log "No se encontraron suscripciones disponibles" -Level "ERROR"
-        exit
-    }
-    
-    # Mostrar suscripciones disponibles
-    Write-Host "Suscripciones disponibles:"
-    $i = 1
-    foreach ($sub in $subscriptions) {
-        Write-Host "$i. $($sub.Name) ($($sub.Id))"
-        $i++
-    }
-    
-    # Seleccionar suscripción
-    if ($subscriptions.Count -eq 1) {
-        $selectedSubscription = $subscriptions[0]
-    }
-    else {
-        $selection = Read-Host "Seleccione el número de la suscripción a auditar (1-$($subscriptions.Count))"
-        $selectedSubscription = $subscriptions[$selection - 1]
-    }
-    
-    # Establecer contexto
-    Set-AzContext -SubscriptionId $selectedSubscription.Id | Out-Null
-    Write-Log "Suscripción seleccionada: $($selectedSubscription.Name) ($($selectedSubscription.Id))" -Level "INFO"
-    
-    # Guardar información en el reporte
-    $contextInfo = @"
+    # Obtener información del tenant
+    $organization = Get-MgOrganization
+    $tenantInfo = @"
 Fecha de auditoría: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-Usuario: $((Get-AzContext).Account.Id)
-Suscripción: $($selectedSubscription.Name)
-ID de Suscripción: $($selectedSubscription.Id)
-Tenant ID: $((Get-AzContext).Tenant.Id)
+Tenant ID: $($organization.Id)
+Nombre del tenant: $($organization.DisplayName)
+Dominio principal: $($organization.VerifiedDomains | Where-Object { $_.IsDefault -eq $true } | Select-Object -ExpandProperty Name)
+Dominios verificados: $($organization.VerifiedDomains.Count)
 "@
     
-    Write-Report -Section "INFORMACIÓN DE CONTEXTO" -Content $contextInfo
+    Write-Report -Section "INFORMACIÓN DEL TENANT" -Content $tenantInfo
 }
 catch {
-    Write-Log "Error durante la autenticación: $_" -Level "ERROR"
+    Write-Log "Error durante la autenticación con Microsoft Graph: $_" -Level "ERROR"
     exit
-}
-
-# Conectar a Microsoft Graph
-try {
-    Connect-MgGraph -Scopes "Directory.Read.All", "Policy.Read.All", "AuditLog.Read.All", "IdentityRiskyUser.Read.All", "Application.Read.All" -ErrorAction Stop
-    Write-Log "Conexión a Microsoft Graph establecida correctamente" -Level "INFO"
-}
-catch {
-    Write-Log "Error al conectar con Microsoft Graph: $_" -Level "WARNING"
-    Write-Log "Algunas funcionalidades relacionadas con Azure AD no estarán disponibles" -Level "WARNING"
 }
 #endregion
 
-#region 2. Enumeración de Asignaciones de Roles
-Write-Log "2. Enumerando asignaciones de roles..." -Level "INFO"
+#region 2. Análisis de Usuarios y Administradores
+Write-Log "2. Analizando usuarios y administradores..." -Level "INFO"
 
 try {
-    # Obtener el usuario actual
-    $currentUser = (Get-AzContext).Account.Id
+    # Obtener todos los usuarios
+    $users = Get-MgUser -All -Property Id, DisplayName, UserPrincipalName, AccountEnabled, CreatedDateTime, UserType, AssignedLicenses
     
-    # Obtener asignaciones de roles para el usuario actual
-    $currentUserRoles = Get-AzRoleAssignment -SignInName $currentUser
+    # Estadísticas básicas de usuarios
+    $enabledUsers = $users | Where-Object { $_.AccountEnabled -eq $true }
+    $disabledUsers = $users | Where-Object { $_.AccountEnabled -eq $false }
+    $guestUsers = $users | Where-Object { $_.UserType -eq "Guest" }
+    $memberUsers = $users | Where-Object { $_.UserType -eq "Member" }
+    $licensedUsers = $users | Where-Object { $_.AssignedLicenses.Count -gt 0 }
     
-    # Obtener todas las asignaciones de roles a nivel de suscripción
-    $allRoleAssignments = Get-AzRoleAssignment
+    $userStats = @"
+Total de usuarios: $($users.Count)
+Usuarios habilitados: $($enabledUsers.Count)
+Usuarios deshabilitados: $($disabledUsers.Count)
+Usuarios invitados: $($guestUsers.Count)
+Usuarios miembros: $($memberUsers.Count)
+Usuarios con licencia: $($licensedUsers.Count)
+"@
     
-    # Formatear la salida para el reporte
-    $currentUserRolesOutput = $currentUserRoles | ForEach-Object {
-        $scope = if ($_.Scope -eq "/") { "Directorio" } else { $_.Scope }
-        "Rol: $($_.RoleDefinitionName)`nAlcance: $scope`nAsignado a: $($_.SignInName)`n---"
+    Write-Report -Section "ESTADÍSTICAS DE USUARIOS" -Content $userStats
+    
+    # Obtener roles de directorio y sus miembros
+    $directoryRoles = Get-MgDirectoryRole -All
+    
+    $roleOutput = "ROLES DE ADMINISTRADOR Y MIEMBROS:`n`n"
+    
+    foreach ($role in $directoryRoles) {
+        $roleMembers = Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id
+        
+        if ($roleMembers.Count -gt 0) {
+            $roleOutput += "Rol: $($role.DisplayName)`n"
+            $roleOutput += "Descripción: $($role.Description)`n"
+            $roleOutput += "Miembros ($($roleMembers.Count)):`n"
+            
+            foreach ($member in $roleMembers) {
+                try {
+                    $user = Get-MgUser -UserId $member.Id -ErrorAction SilentlyContinue
+                    if ($user) {
+                        $roleOutput += "  - $($user.DisplayName) ($($user.UserPrincipalName))`n"
+                    }
+                    else {
+                        $sp = Get-MgServicePrincipal -ServicePrincipalId $member.Id -ErrorAction SilentlyContinue
+                        if ($sp) {
+                            $roleOutput += "  - [App] $($sp.DisplayName)`n"
+                        }
+                        else {
+                            $roleOutput += "  - ID: $($member.Id) (Tipo desconocido)`n"
+                        }
+                    }
+                }
+                catch {
+                    $roleOutput += "  - Error al obtener detalles del miembro: $($member.Id)`n"
+                }
+            }
+            
+            # Marcar roles críticos
+            $criticalRoles = @(
+                "Global Administrator", 
+                "Privileged Role Administrator", 
+                "User Administrator", 
+                "Exchange Administrator", 
+                "SharePoint Administrator", 
+                "Conditional Access Administrator",
+                "Security Administrator",
+                "Application Administrator"
+            )
+            
+            if ($criticalRoles -contains $role.DisplayName) {
+                $roleOutput += "⚠️ ALERTA: Este es un rol crítico con altos privilegios`n"
+                
+                # Verificar si hay demasiados administradores globales
+                if ($role.DisplayName -eq "Global Administrator" -and $roleMembers.Count -gt 5) {
+                    $roleOutput += "⚠️ ALERTA: Hay $($roleMembers.Count) Administradores Globales. Microsoft recomienda limitar este número.`n"
+                }
+            }
+            
+            $roleOutput += "---`n"
+        }
     }
     
-    $allRolesOutput = $allRoleAssignments | ForEach-Object {
-        $scope = if ($_.Scope -eq "/") { "Directorio" } else { $_.Scope }
-        "Rol: $($_.RoleDefinitionName)`nAlcance: $scope`nAsignado a: $($_.SignInName)`n---"
-    }
-    
-    # Escribir en el reporte
-    Write-Report -Section "ASIGNACIONES DE ROLES DEL USUARIO ACTUAL" -Content ($currentUserRolesOutput -join "`n")
-    Write-Report -Section "TODAS LAS ASIGNACIONES DE ROLES" -Content ($allRolesOutput -join "`n")
-    
-    Write-Log "Asignaciones de roles enumeradas correctamente" -Level "INFO"
+    Write-Report -Section "ROLES DE ADMINISTRADOR" -Content $roleOutput
+    Write-Log "Usuarios y administradores analizados correctamente" -Level "INFO"
 }
 catch {
-    Write-Log "Error al enumerar asignaciones de roles: $_" -Level "ERROR"
-    Write-Report -Section "ASIGNACIONES DE ROLES" -Content "Error al obtener información: $_"
+    Write-Log "Error al analizar usuarios y administradores: $_" -Level "ERROR"
+    Write-Report -Section "USUARIOS Y ADMINISTRADORES" -Content "Error al obtener información: $_"
 }
 #endregion
 
@@ -191,115 +225,114 @@ catch {
 Write-Log "3. Revisando políticas de acceso condicional..." -Level "INFO"
 
 try {
-    # Verificar si estamos conectados a Microsoft Graph
-    if (Get-Command Get-MgIdentityConditionalAccessPolicy -ErrorAction SilentlyContinue) {
-        # Obtener políticas de acceso condicional
-        $conditionalAccessPolicies = Get-MgIdentityConditionalAccessPolicy
-        
-        if ($conditionalAccessPolicies.Count -eq 0) {
-            $policiesOutput = "No se encontraron políticas de acceso condicional configuradas."
-        }
-        else {
-            $policiesOutput = $conditionalAccessPolicies | ForEach-Object {
-                $policy = $_
-                $output = "Nombre: $($policy.DisplayName)`n"
-                $output += "Estado: $(if ($policy.State -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' })`n"
-                $output += "ID: $($policy.Id)`n"
-                
-                # Condiciones
-                $output += "Condiciones:`n"
-                
-                # Usuarios
-                $output += "  - Usuarios incluidos: "
-                if ($policy.Conditions.Users.IncludeUsers -contains 'All') {
-                    $output += "Todos`n"
-                }
-                elseif ($policy.Conditions.Users.IncludeUsers.Count -gt 0) {
-                    $output += "$($policy.Conditions.Users.IncludeUsers -join ', ')`n"
-                }
-                else {
-                    $output += "Ninguno`n"
-                }
-                
-                $output += "  - Usuarios excluidos: $($policy.Conditions.Users.ExcludeUsers -join ', ')`n"
-                
-                # Aplicaciones
-                $output += "  - Aplicaciones incluidas: "
-                if ($policy.Conditions.Applications.IncludeApplications -contains 'All') {
-                    $output += "Todas`n"
-                }
-                elseif ($policy.Conditions.Applications.IncludeApplications.Count -gt 0) {
-                    $output += "$($policy.Conditions.Applications.IncludeApplications -join ', ')`n"
-                }
-                else {
-                    $output += "Ninguna`n"
-                }
-                
-                # Ubicaciones
-                if ($policy.Conditions.Locations) {
-                    $output += "  - Ubicaciones incluidas: $($policy.Conditions.Locations.IncludeLocations -join ', ')`n"
-                    $output += "  - Ubicaciones excluidas: $($policy.Conditions.Locations.ExcludeLocations -join ', ')`n"
-                }
-                
-                # Controles de acceso
-                $output += "Controles de acceso:`n"
-                
-                # Concesión
-                if ($policy.GrantControls) {
-                    $output += "  - Tipo de control: $(if ($policy.GrantControls.Operator -eq 'OR') { 'Requerir uno de los controles seleccionados' } else { 'Requerir todos los controles seleccionados' })`n"
-                    
-                    if ($policy.GrantControls.BuiltInControls -contains 'mfa') {
-                        $output += "  - Requiere MFA: Sí`n"
-                    }
-                    
-                    if ($policy.GrantControls.BuiltInControls -contains 'compliantDevice') {
-                        $output += "  - Requiere dispositivo compatible: Sí`n"
-                    }
-                    
-                    if ($policy.GrantControls.BuiltInControls -contains 'domainJoinedDevice') {
-                        $output += "  - Requiere dispositivo unido a dominio: Sí`n"
-                    }
-                    
-                    if ($policy.GrantControls.BuiltInControls -contains 'approvedApplication') {
-                        $output += "  - Requiere aplicación aprobada: Sí`n"
-                    }
-                    
-                    if ($policy.GrantControls.BuiltInControls -contains 'compliantApplication') {
-                        $output += "  - Requiere aplicación compatible: Sí`n"
-                    }
-                }
-                
-                # Sesión
-                if ($policy.SessionControls) {
-                    if ($policy.SessionControls.ApplicationEnforcedRestrictions.IsEnabled) {
-                        $output += "  - Restricciones de aplicación aplicadas: Sí`n"
-                    }
-                    
-                    if ($policy.SessionControls.CloudAppSecurity.IsEnabled) {
-                        $output += "  - Uso de Cloud App Security: Sí`n"
-                    }
-                    
-                    if ($policy.SessionControls.SignInFrequency.IsEnabled) {
-                        $output += "  - Frecuencia de inicio de sesión: $($policy.SessionControls.SignInFrequency.Value) $($policy.SessionControls.SignInFrequency.Type)`n"
-                    }
-                    
-                    if ($policy.SessionControls.PersistentBrowser.IsEnabled) {
-                        $output += "  - Persistencia de sesión de navegador: $($policy.SessionControls.PersistentBrowser.Mode)`n"
-                    }
-                }
-                
-                $output += "---`n"
-                return $output
-            }
-        }
-        
-        Write-Report -Section "POLÍTICAS DE ACCESO CONDICIONAL" -Content ($policiesOutput -join "`n")
-        Write-Log "Políticas de acceso condicional revisadas correctamente" -Level "INFO"
+    # Obtener políticas de acceso condicional
+    $conditionalAccessPolicies = Get-MgIdentityConditionalAccessPolicy
+    
+    if ($conditionalAccessPolicies.Count -eq 0) {
+        $policiesOutput = "No se encontraron políticas de acceso condicional configuradas.`n"
+        $policiesOutput += "⚠️ ALERTA: La falta de políticas de acceso condicional puede representar un riesgo de seguridad.`n"
     }
     else {
-        Write-Log "No se pudo acceder a las políticas de acceso condicional. Verifique los permisos de Microsoft Graph" -Level "WARNING"
-        Write-Report -Section "POLÍTICAS DE ACCESO CONDICIONAL" -Content "No se pudo acceder a las políticas de acceso condicional. Verifique los permisos de Microsoft Graph."
+        $policiesOutput = $conditionalAccessPolicies | ForEach-Object {
+            $policy = $_
+            $output = "Nombre: $($policy.DisplayName)`n"
+            $output += "Estado: $(if ($policy.State -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' })`n"
+            $output += "ID: $($policy.Id)`n"
+            
+            # Condiciones
+            $output += "Condiciones:`n"
+            
+            # Usuarios
+            $output += "  - Usuarios incluidos: "
+            if ($policy.Conditions.Users.IncludeUsers -contains 'All') {
+                $output += "Todos`n"
+            }
+            elseif ($policy.Conditions.Users.IncludeUsers.Count -gt 0) {
+                $output += "$($policy.Conditions.Users.IncludeUsers -join ', ')`n"
+            }
+            else {
+                $output += "Ninguno`n"
+            }
+            
+            $output += "  - Usuarios excluidos: $($policy.Conditions.Users.ExcludeUsers -join ', ')`n"
+            
+            # Aplicaciones
+            $output += "  - Aplicaciones incluidas: "
+            if ($policy.Conditions.Applications.IncludeApplications -contains 'All') {
+                $output += "Todas`n"
+            }
+            elseif ($policy.Conditions.Applications.IncludeApplications.Count -gt 0) {
+                $output += "$($policy.Conditions.Applications.IncludeApplications -join ', ')`n"
+            }
+            else {
+                $output += "Ninguna`n"
+            }
+            
+            # Ubicaciones
+            if ($policy.Conditions.Locations) {
+                $output += "  - Ubicaciones incluidas: $($policy.Conditions.Locations.IncludeLocations -join ', ')`n"
+                $output += "  - Ubicaciones excluidas: $($policy.Conditions.Locations.ExcludeLocations -join ', ')`n"
+            }
+            
+            # Controles de acceso
+            $output += "Controles de acceso:`n"
+            
+            # Concesión
+            if ($policy.GrantControls) {
+                $output += "  - Tipo de control: $(if ($policy.GrantControls.Operator -eq 'OR') { 'Requerir uno de los controles seleccionados' } else { 'Requerir todos los controles seleccionados' })`n"
+                
+                if ($policy.GrantControls.BuiltInControls -contains 'mfa') {
+                    $output += "  - Requiere MFA: Sí`n"
+                }
+                else {
+                    $output += "  - Requiere MFA: No`n"
+                }
+                
+                if ($policy.GrantControls.BuiltInControls -contains 'compliantDevice') {
+                    $output += "  - Requiere dispositivo compatible: Sí`n"
+                }
+                
+                if ($policy.GrantControls.BuiltInControls -contains 'domainJoinedDevice') {
+                    $output += "  - Requiere dispositivo unido a dominio: Sí`n"
+                }
+            }
+            
+            # Verificar si hay políticas para administradores
+            $adminRoles = @("Global Administrator", "Privileged Role Administrator", "User Administrator")
+            $hasAdminPolicy = $false
+            
+            if ($policy.Conditions.Users.IncludeRoles) {
+                foreach ($role in $policy.Conditions.Users.IncludeRoles) {
+                    if ($adminRoles -contains $role) {
+                        $hasAdminPolicy = $true
+                        break
+                    }
+                }
+            }
+            
+            if ($hasAdminPolicy -and $policy.State -eq 'enabled') {
+                $output += "✓ BUENA PRÁCTICA: Esta política protege cuentas de administrador`n"
+            }
+            
+            $output += "---`n"
+            return $output
+        }
+        
+        # Verificar si hay política de línea base para todos los usuarios
+        $hasBaselinePolicy = $conditionalAccessPolicies | Where-Object { 
+            $_.Conditions.Users.IncludeUsers -contains 'All' -and 
+            $_.State -eq 'enabled' -and 
+            $_.GrantControls.BuiltInControls -contains 'mfa'
+        }
+        
+        if (-not $hasBaselinePolicy) {
+            $policiesOutput += "`n⚠️ ALERTA: No se detectó una política de línea base que requiera MFA para todos los usuarios.`n"
+            $policiesOutput += "Se recomienda implementar al menos una política que requiera MFA para todos los usuarios.`n"
+        }
     }
+    
+    Write-Report -Section "POLÍTICAS DE ACCESO CONDICIONAL" -Content $policiesOutput
+    Write-Log "Políticas de acceso condicional revisadas correctamente" -Level "INFO"
 }
 catch {
     Write-Log "Error al revisar políticas de acceso condicional: $_" -Level "ERROR"
@@ -307,105 +340,128 @@ catch {
 }
 #endregion
 
-#region 4. Verificación de Configuraciones de MFA y Seguridad de Identidad
-Write-Log "4. Verificando configuraciones de MFA y seguridad de identidad..." -Level "INFO"
+#region 4. Verificación de Configuraciones de MFA
+Write-Log "4. Verificando configuraciones de MFA..." -Level "INFO"
 
 try {
-    # Verificar si estamos conectados a Microsoft Graph
-    if (Get-Command Get-MgUser -ErrorAction SilentlyContinue) {
-        # Obtener usuarios
-        $users = Get-MgUser -All -Property Id, DisplayName, UserPrincipalName, StrongAuthenticationMethods, StrongAuthenticationPhoneAppDetails
+    # Obtener configuración de autenticación
+    $authenticationMethodsPolicy = Get-MgPolicyAuthenticationMethodPolicy
+    
+    if ($authenticationMethodsPolicy) {
+        $mfaConfig = @"
+CONFIGURACIÓN GENERAL DE MFA:
+
+Estado de la política: $(if ($authenticationMethodsPolicy.State -eq 'enabled') { 'Habilitada' } else { 'Deshabilitada' })
+"@
         
-        # Analizar estado de MFA
-        $mfaStatusOutput = "ESTADO DE MFA POR USUARIO:`n`n"
+        # Obtener métodos de autenticación configurados
+        $authMethods = Get-MgPolicyAuthenticationMethodPolicyAuthenticationMethod
         
-        foreach ($user in $users) {
-            $mfaStatusOutput += "Usuario: $($user.DisplayName) ($($user.UserPrincipalName))`n"
+        if ($authMethods) {
+            $mfaConfig += "`n`nMÉTODOS DE AUTENTICACIÓN CONFIGURADOS:`n"
             
-            # Intentar obtener métodos de autenticación
-            try {
-                $authMethods = Get-MgUserAuthenticationMethod -UserId $user.Id
-                
-                if ($authMethods) {
-                    $mfaStatusOutput += "Métodos de autenticación configurados:`n"
-                    
-                    foreach ($method in $authMethods) {
-                        $methodType = $method.AdditionalProperties.'@odata.type'
-                        
-                        switch -Wildcard ($methodType) {
-                            "*microsoftAuthenticatorMethodConfiguration" { $mfaStatusOutput += "  - Microsoft Authenticator`n" }
-                            "*phoneAuthenticationMethodConfiguration" { $mfaStatusOutput += "  - Teléfono`n" }
-                            "*passwordAuthenticationMethodConfiguration" { $mfaStatusOutput += "  - Contraseña`n" }
-                            "*fido2AuthenticationMethodConfiguration" { $mfaStatusOutput += "  - FIDO2 Security Key`n" }
-                            "*windowsHelloForBusinessAuthenticationMethodConfiguration" { $mfaStatusOutput += "  - Windows Hello for Business`n" }
-                            "*emailAuthenticationMethodConfiguration" { $mfaStatusOutput += "  - Email`n" }
-                            "*temporaryAccessPassAuthenticationMethodConfiguration" { $mfaStatusOutput += "  - Temporary Access Pass`n" }
-                            "*softwareOathAuthenticationMethodConfiguration" { $mfaStatusOutput += "  - Software OATH Token`n" }
-                            default { $mfaStatusOutput += "  - Otro método: $methodType`n" }
-                        }
-                    }
-                    
-                    # Determinar si MFA está habilitado
-                    $hasMfa = $authMethods | Where-Object { 
-                        $_.AdditionalProperties.'@odata.type' -ne "#microsoft.graph.passwordAuthenticationMethod" -and 
-                        $_.AdditionalProperties.'@odata.type' -ne $null
-                    }
-                    
-                    if ($hasMfa) {
-                        $mfaStatusOutput += "MFA habilitado: Sí`n"
-                    }
-                    else {
-                        $mfaStatusOutput += "MFA habilitado: No`n"
-                    }
-                }
-                else {
-                    $mfaStatusOutput += "No se encontraron métodos de autenticación configurados.`n"
-                    $mfaStatusOutput += "MFA habilitado: No`n"
-                }
+            foreach ($method in $authMethods) {
+                $methodState = if ($method.State -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' }
+                $mfaConfig += "`n- $($method.AdditionalProperties.'@odata.type' -replace '#microsoft.graph.', ''): $methodState"
             }
-            catch {
-                $mfaStatusOutput += "Error al obtener métodos de autenticación: $_`n"
-            }
-            
-            $mfaStatusOutput += "---`n"
         }
         
-        # Intentar obtener usuarios en riesgo
+        # Verificar configuración de SSPR
         try {
-            if (Get-Command Get-MgRiskyUser -ErrorAction SilentlyContinue) {
-                $riskyUsers = Get-MgRiskyUser -All
+            $sspr = Get-MgPolicyAuthenticationMethodPolicyAuthenticationMethodConfiguration -AuthenticationMethodConfigurationId "passwordReset"
+            
+            if ($sspr) {
+                $mfaConfig += "`n`nCONFIGURACIÓN DE AUTOSERVICIO DE RESTABLECIMIENTO DE CONTRASEÑA (SSPR):`n"
+                $mfaConfig += "`nEstado: $(if ($sspr.State -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' })"
                 
-                if ($riskyUsers.Count -gt 0) {
-                    $riskyUsersOutput = "USUARIOS EN RIESGO:`n`n"
-                    
-                    foreach ($riskyUser in $riskyUsers) {
-                        $riskyUsersOutput += "Usuario: $($riskyUser.UserDisplayName) ($($riskyUser.UserPrincipalName))`n"
-                        $riskyUsersOutput += "Nivel de riesgo: $($riskyUser.RiskLevel)`n"
-                        $riskyUsersOutput += "Estado de riesgo: $($riskyUser.RiskState)`n"
-                        $riskyUsersOutput += "Última actualización: $($riskyUser.RiskLastUpdatedDateTime)`n"
-                        $riskyUsersOutput += "---`n"
+                if ($sspr.State -eq 'enabled') {
+                    # Verificar métodos permitidos para SSPR
+                    if ($sspr.AdditionalProperties.authenticationMethodConfigurations) {
+                        $mfaConfig += "`nMétodos permitidos para SSPR:"
+                        
+                        foreach ($method in $sspr.AdditionalProperties.authenticationMethodConfigurations) {
+                            $methodState = if ($method.state -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' }
+                            $mfaConfig += "`n- $($method.'@odata.type' -replace '#microsoft.graph.', ''): $methodState"
+                        }
                     }
                 }
                 else {
-                    $riskyUsersOutput = "No se encontraron usuarios en riesgo.`n"
+                    $mfaConfig += "`n⚠️ ALERTA: El autoservicio de restablecimiento de contraseña (SSPR) está deshabilitado."
                 }
-            }
-            else {
-                $riskyUsersOutput = "No se pudo acceder a la información de usuarios en riesgo. Verifique los permisos de Microsoft Graph.`n"
             }
         }
         catch {
-            $riskyUsersOutput = "Error al obtener usuarios en riesgo: $_`n"
+            $mfaConfig += "`n`nNo se pudo obtener información de SSPR: $_"
         }
-        
-        Write-Report -Section "CONFIGURACIÓN DE MFA" -Content $mfaStatusOutput
-        Write-Report -Section "USUARIOS EN RIESGO" -Content $riskyUsersOutput
-        Write-Log "Configuraciones de MFA y seguridad de identidad verificadas correctamente" -Level "INFO"
     }
     else {
-        Write-Log "No se pudo acceder a la información de MFA. Verifique los permisos de Microsoft Graph" -Level "WARNING"
-        Write-Report -Section "CONFIGURACIÓN DE MFA" -Content "No se pudo acceder a la información de MFA. Verifique los permisos de Microsoft Graph."
+        $mfaConfig = "No se pudo obtener la configuración de métodos de autenticación.`n"
     }
+    
+    # Analizar estado de MFA por usuario
+    $mfaStatusOutput = "`nESTADO DE MFA POR USUARIO:`n"
+    
+    # Obtener usuarios (limitado a 100 para evitar problemas de rendimiento)
+    $users = Get-MgUser -Top 100 -Property Id, DisplayName, UserPrincipalName, AccountEnabled, UserType
+    
+    $usersWithoutMfa = 0
+    $adminsWithoutMfa = 0
+    $totalChecked = 0
+    
+    foreach ($user in $users) {
+        # Omitir cuentas deshabilitadas y cuentas de invitado
+        if (-not $user.AccountEnabled -or $user.UserType -eq "Guest") {
+            continue
+        }
+        
+        $totalChecked++
+        
+        # Obtener métodos de autenticación del usuario
+        try {
+            $authMethods = Get-MgUserAuthenticationMethod -UserId $user.Id
+            
+            # Determinar si MFA está habilitado
+            $hasMfa = $authMethods | Where-Object { 
+                $_.AdditionalProperties.'@odata.type' -ne "#microsoft.graph.passwordAuthenticationMethod" -and 
+                $_.AdditionalProperties.'@odata.type' -ne $null
+            }
+            
+            if (-not $hasMfa) {
+                $usersWithoutMfa++
+                $mfaStatusOutput += "- $($user.DisplayName) ($($user.UserPrincipalName)) no tiene MFA configurado`n"
+                
+                # Verificar si es administrador
+                $userRoles = Get-MgUserDirectoryRole -UserId $user.Id -ErrorAction SilentlyContinue
+                if ($userRoles) {
+                    $adminsWithoutMfa++
+                    $mfaStatusOutput += "  ⚠️ ALERTA: Este usuario tiene roles de administrador`n"
+                }
+            }
+        }
+        catch {
+            $mfaStatusOutput += "- Error al verificar MFA para $($user.DisplayName): $_`n"
+        }
+    }
+    
+    # Añadir estadísticas de MFA
+    $mfaStats = @"
+ESTADÍSTICAS DE MFA:
+
+Usuarios verificados: $totalChecked
+Usuarios sin MFA: $usersWithoutMfa ($(if ($totalChecked -gt 0) { [math]::Round(($usersWithoutMfa / $totalChecked) * 100, 2) } else { 0 })%)
+Administradores sin MFA: $adminsWithoutMfa
+"@
+    
+    if ($adminsWithoutMfa -gt 0) {
+        $mfaStats += "`n⚠️ ALERTA CRÍTICA: Hay administradores sin MFA configurado. Esto representa un riesgo de seguridad significativo.`n"
+    }
+    
+    if ($usersWithoutMfa / $totalChecked -gt 0.5) {
+        $mfaStats += "`n⚠️ ALERTA: Más del 50% de los usuarios no tienen MFA configurado.`n"
+    }
+    
+    Write-Report -Section "CONFIGURACIÓN DE MFA" -Content "$mfaConfig`n`n$mfaStats`n`n$mfaStatusOutput"
+    Write-Log "Configuraciones de MFA verificadas correctamente" -Level "INFO"
 }
 catch {
     Write-Log "Error al verificar configuraciones de MFA: $_" -Level "ERROR"
@@ -413,443 +469,351 @@ catch {
 }
 #endregion
 
-#region 5. Análisis de Alertas y Registros de Seguridad
-Write-Log "5. Analizando alertas y registros de seguridad..." -Level "INFO"
+#region 5. Análisis de Aplicaciones y Permisos
+Write-Log "5. Analizando aplicaciones y permisos..." -Level "INFO"
 
 try {
-    # Obtener alertas de seguridad de Microsoft Defender for Cloud
-    $securityAlerts = Get-AzSecurityAlert
+    # Obtener aplicaciones registradas
+    $applications = Get-MgApplication -All
     
-    if ($securityAlerts.Count -eq 0) {
-        $alertsOutput = "No se encontraron alertas de seguridad activas.`n"
+    if ($applications.Count -eq 0) {
+        $appsOutput = "No se encontraron aplicaciones registradas en Azure AD.`n"
     }
     else {
-        $alertsOutput = $securityAlerts | ForEach-Object {
-            "ID: $($_.AlertId)`n"
-            "Nombre: $($_.AlertDisplayName)`n"
-            "Severidad: $($_.AlertSeverity)`n"
-            "Estado: $($_.AlertState)`n"
-            "Recurso afectado: $($_.CompromisedEntity)`n"
-            "Descripción: $($_.AlertDescription)`n"
-            "Fecha de detección: $($_.TimeGeneratedUtc)`n"
-            "---`n"
-        }
-    }
-    
-    # Obtener registros de actividad recientes (últimos 7 días)
-    $startTime = (Get-Date).AddDays(-7)
-    $endTime = Get-Date
-    
-    $activityLogs = Get-AzActivityLog -StartTime $startTime -EndTime $endTime
-    
-    if ($activityLogs.Count -eq 0) {
-        $logsOutput = "No se encontraron registros de actividad en los últimos 7 días.`n"
-    }
-    else {
-        # Filtrar eventos relevantes para seguridad
-        $securityLogs = $activityLogs | Where-Object { 
-            $_.OperationName.Value -like "*security*" -or 
-            $_.OperationName.Value -like "*auth*" -or 
-            $_.OperationName.Value -like "*role*" -or 
-            $_.OperationName.Value -like "*permission*" -or
-            $_.OperationName.Value -like "*key*" -or
-            $_.OperationName.Value -like "*secret*" -or
-            $_.OperationName.Value -like "*vault*" -or
-            $_.OperationName.Value -like "*network*" -or
-            $_.OperationName.Value -like "*firewall*" -or
-            $_.Level -eq "Warning" -or 
-            $_.Level -eq "Error"
-        }
+        $appsOutput = "APLICACIONES REGISTRADAS EN AZURE AD:`n`n"
         
-        if ($securityLogs.Count -eq 0) {
-            $logsOutput = "No se encontraron registros de actividad relevantes para seguridad en los últimos 7 días.`n"
-        }
-        else {
-            $logsOutput = $securityLogs | ForEach-Object {
-                "Operación: $($_.OperationName.Value)`n"
-                "Nivel: $($_.Level)`n"
-                "Estado: $($_.Status.Value)`n"
-                "Iniciador: $($_.Caller)`n"
-                "Recurso: $($_.ResourceId)`n"
-                "Fecha: $($_.EventTimestamp)`n"
-                "---`n"
-            }
-        }
-    }
-    
-    Write-Report -Section "ALERTAS DE SEGURIDAD" -Content ($alertsOutput -join "`n")
-    Write-Report -Section "REGISTROS DE ACTIVIDAD RELEVANTES PARA SEGURIDAD (ÚLTIMOS 7 DÍAS)" -Content ($logsOutput -join "`n")
-    Write-Log "Alertas y registros de seguridad analizados correctamente" -Level "INFO"
-}
-catch {
-    Write-Log "Error al analizar alertas y registros de seguridad: $_" -Level "ERROR"
-    Write-Report -Section "ALERTAS Y REGISTROS DE SEGURIDAD" -Content "Error al obtener información: $_"
-}
-#endregion
-
-#region 6. Revisión de Configuraciones de Recursos
-Write-Log "6. Revisando configuraciones de recursos..." -Level "INFO"
-
-try {
-    # Obtener Network Security Groups
-    $nsgs = Get-AzNetworkSecurityGroup
-    
-    if ($nsgs.Count -eq 0) {
-        $nsgsOutput = "No se encontraron Network Security Groups.`n"
-    }
-    else {
-        $nsgsOutput = "NETWORK SECURITY GROUPS:`n`n"
-        
-        foreach ($nsg in $nsgs) {
-            $nsgsOutput += "Nombre: $($nsg.Name)`n"
-            $nsgsOutput += "Grupo de recursos: $($nsg.ResourceGroupName)`n"
-            $nsgsOutput += "Ubicación: $($nsg.Location)`n"
-            $nsgsOutput += "Reglas de seguridad:`n"
+        foreach ($app in $applications) {
+            $appsOutput += "Nombre: $($app.DisplayName)`n"
+            $appsOutput += "ID de aplicación: $($app.AppId)`n"
+            $appsOutput += "ID de objeto: $($app.Id)`n"
+            $appsOutput += "Fecha de creación: $($app.CreatedDateTime)`n"
             
-            # Reglas de seguridad de entrada
-            $nsgsOutput += "  Reglas de entrada:`n"
-            foreach ($rule in $nsg.SecurityRules | Where-Object { $_.Direction -eq "Inbound" } | Sort-Object Priority) {
-                $nsgsOutput += "    - Nombre: $($rule.Name)`n"
-                $nsgsOutput += "      Prioridad: $($rule.Priority)`n"
-                $nsgsOutput += "      Acceso: $($rule.Access)`n"
-                $nsgsOutput += "      Protocolo: $($rule.Protocol)`n"
-                $nsgsOutput += "      Dirección: $($rule.Direction)`n"
-                $nsgsOutput += "      Origen: $($rule.SourceAddressPrefix -join ', ')`n"
-                $nsgsOutput += "      Puerto origen: $($rule.SourcePortRange -join ', ')`n"
-                $nsgsOutput += "      Destino: $($rule.DestinationAddressPrefix -join ', ')`n"
-                $nsgsOutput += "      Puerto destino: $($rule.DestinationPortRange -join ', ')`n"
+            # Verificar si la aplicación tiene secretos
+            if ($app.PasswordCredentials.Count -gt 0) {
+                $appsOutput += "Secretos configurados: $($app.PasswordCredentials.Count)`n"
                 
-                # Marcar reglas potencialmente peligrosas
-                if (($rule.Access -eq "Allow") -and 
-                    (($rule.SourceAddressPrefix -contains "*") -or ($rule.SourceAddressPrefix -contains "Internet") -or ($rule.SourceAddressPrefix -contains "0.0.0.0/0")) -and
-                    (($rule.DestinationPortRange -contains "*") -or ($rule.DestinationPortRange -contains "3389") -or ($rule.DestinationPortRange -contains "22"))) {
-                    $nsgsOutput += "      ⚠️ ALERTA: Esta regla permite acceso amplio desde Internet a puertos sensibles`n"
-                }
-                
-                $nsgsOutput += "`n"
-            }
-            
-            # Reglas de seguridad de salida
-            $nsgsOutput += "  Reglas de salida:`n"
-            foreach ($rule in $nsg.SecurityRules | Where-Object { $_.Direction -eq "Outbound" } | Sort-Object Priority) {
-                $nsgsOutput += "    - Nombre: $($rule.Name)`n"
-                $nsgsOutput += "      Prioridad: $($rule.Priority)`n"
-                $nsgsOutput += "      Acceso: $($rule.Access)`n"
-                $nsgsOutput += "      Protocolo: $($rule.Protocol)`n"
-                $nsgsOutput += "      Dirección: $($rule.Direction)`n"
-                $nsgsOutput += "      Origen: $($rule.SourceAddressPrefix -join ', ')`n"
-                $nsgsOutput += "      Puerto origen: $($rule.SourcePortRange -join ', ')`n"
-                $nsgsOutput += "      Destino: $($rule.DestinationAddressPrefix -join ', ')`n"
-                $nsgsOutput += "      Puerto destino: $($rule.DestinationPortRange -join ', ')`n"
-                $nsgsOutput += "`n"
-            }
-            
-            $nsgsOutput += "---`n"
-        }
-    }
-    
-    # Obtener cuentas de almacenamiento
-    $storageAccounts = Get-AzStorageAccount
-    
-    if ($storageAccounts.Count -eq 0) {
-        $storageOutput = "No se encontraron cuentas de almacenamiento.`n"
-    }
-    else {
-        $storageOutput = "CUENTAS DE ALMACENAMIENTO:`n`n"
-        
-        foreach ($storage in $storageAccounts) {
-            $storageOutput += "Nombre: $($storage.StorageAccountName)`n"
-            $storageOutput += "Grupo de recursos: $($storage.ResourceGroupName)`n"
-            $storageOutput += "Ubicación: $($storage.Location)`n"
-            $storageOutput += "Tipo de cuenta: $($storage.Kind)`n"
-            $storageOutput += "Nivel de replicación: $($storage.Sku.Name)`n"
-            
-            # Verificar si HTTPS está habilitado
-            $storageOutput += "HTTPS requerido: $($storage.EnableHttpsTrafficOnly)`n"
-            
-            # Verificar acceso de red
-            $storageOutput += "Acceso de red: $($storage.NetworkRuleSet.DefaultAction)`n"
-            
-            # Verificar si el acceso público está habilitado para blobs
-            try {
-                $ctx = $storage.Context
-                $blobServices = Get-AzStorageBlobServiceProperty -Context $ctx -ErrorAction SilentlyContinue
-                
-                if ($blobServices) {
-                    $storageOutput += "Acceso público a blobs: $($blobServices.PublicAccess)`n"
+                foreach ($secret in $app.PasswordCredentials) {
+                    $expiryDate = $secret.EndDateTime
+                    $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
                     
-                    if ($blobServices.PublicAccess -ne "None") {
-                        $storageOutput += "⚠️ ALERTA: El acceso público a blobs está habilitado`n"
+                    $appsOutput += "  - Secreto expira el: $expiryDate (en $daysUntilExpiry días)`n"
+                    
+                    if ($daysUntilExpiry -lt 30) {
+                        $appsOutput += "    ⚠️ ALERTA: Este secreto expirará pronto`n"
                     }
                 }
-                else {
-                    $storageOutput += "No se pudo obtener información de acceso público a blobs`n"
-                }
-            }
-            catch {
-                $storageOutput += "Error al verificar acceso público a blobs: $_`n"
-            }
-            
-            # Verificar si el firewall está configurado
-            if ($storage.NetworkRuleSet.IpRules.Count -gt 0 -or $storage.NetworkRuleSet.VirtualNetworkRules.Count -gt 0) {
-                $storageOutput += "Firewall configurado: Sí`n"
-                $storageOutput += "  Reglas IP: $($storage.NetworkRuleSet.IpRules.Count)`n"
-                $storageOutput += "  Reglas de red virtual: $($storage.NetworkRuleSet.VirtualNetworkRules.Count)`n"
             }
             else {
-                $storageOutput += "Firewall configurado: No`n"
+                $appsOutput += "Secretos configurados: 0`n"
             }
             
-            $storageOutput += "---`n"
-        }
-    }
-    
-    # Obtener máquinas virtuales
-    $vms = Get-AzVM
-    
-    if ($vms.Count -eq 0) {
-        $vmsOutput = "No se encontraron máquinas virtuales.`n"
-    }
-    else {
-        $vmsOutput = "MÁQUINAS VIRTUALES:`n`n"
-        
-        foreach ($vm in $vms) {
-            $vmsOutput += "Nombre: $($vm.Name)`n"
-            $vmsOutput += "Grupo de recursos: $($vm.ResourceGroupName)`n"
-            $vmsOutput += "Ubicación: $($vm.Location)`n"
-            $vmsOutput += "Tamaño: $($vm.HardwareProfile.VmSize)`n"
-            $vmsOutput += "Sistema operativo: $($vm.StorageProfile.OsDisk.OsType)`n"
-            
-            # Verificar si el disco está cifrado
-            try {
-                $encryption = Get-AzVMDiskEncryptionStatus -ResourceGroupName $vm.ResourceGroupName -VMName $vm.Name -ErrorAction SilentlyContinue
+            # Verificar si la aplicación tiene certificados
+            if ($app.KeyCredentials.Count -gt 0) {
+                $appsOutput += "Certificados configurados: $($app.KeyCredentials.Count)`n"
                 
-                if ($encryption) {
-                    $vmsOutput += "Cifrado de disco OS: $($encryption.OsVolumeEncrypted)`n"
-                    $vmsOutput += "Cifrado de disco de datos: $($encryption.DataVolumesEncrypted)`n"
+                foreach ($cert in $app.KeyCredentials) {
+                    $expiryDate = $cert.EndDateTime
+                    $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
                     
-                    if ($encryption.OsVolumeEncrypted -eq "NotEncrypted") {
-                        $vmsOutput += "⚠️ ALERTA: El disco del sistema operativo no está cifrado`n"
+                    $appsOutput += "  - Certificado expira el: $expiryDate (en $daysUntilExpiry días)`n"
+                    
+                    if ($daysUntilExpiry -lt 30) {
+                        $appsOutput += "    ⚠️ ALERTA: Este certificado expirará pronto`n"
                     }
                 }
-                else {
-                    $vmsOutput += "No se pudo obtener información de cifrado de disco`n"
+            }
+            else {
+                $appsOutput += "Certificados configurados: 0`n"
+            }
+            
+            # Verificar permisos delegados y de aplicación
+            try {
+                $appServicePrincipals = Get-MgServicePrincipal -Filter "appId eq '$($app.AppId)'"
+                
+                if ($appServicePrincipals) {
+                    $sp = $appServicePrincipals[0]
+                    
+                    # Verificar permisos delegados
+                    $oauth2PermissionGrants = Get-MgServicePrincipalOauth2PermissionGrant -ServicePrincipalId $sp.Id -All
+                    
+                    if ($oauth2PermissionGrants) {
+                        $appsOutput += "Permisos delegados:`n"
+                        
+                        foreach ($grant in $oauth2PermissionGrants) {
+                            $resourceSp = Get-MgServicePrincipal -ServicePrincipalId $grant.ResourceId -ErrorAction SilentlyContinue
+                            $resourceName = if ($resourceSp) { $resourceSp.DisplayName } else { $grant.ResourceId }
+                            
+                            $appsOutput += "  - Recurso: $resourceName`n"
+                            $appsOutput += "    Alcances: $($grant.Scope)`n"
+                            
+                            # Verificar permisos sensibles
+                            $sensitiveScopes = @("Mail.Read", "Mail.ReadWrite", "Files.Read", "Files.ReadWrite", "Directory.Read.All", "Directory.ReadWrite.All", "User.Read.All", "User.ReadWrite.All")
+                            $grantedScopes = $grant.Scope -split " "
+                            
+                            foreach ($scope in $grantedScopes) {
+                                if ($sensitiveScopes -contains $scope) {
+                                    $appsOutput += "    ⚠️ ALERTA: Permiso sensible detectado: $scope`n"
+                                }
+                            }
+                        }
+                    }
+                    
+                    # Verificar permisos de aplicación
+                    $appRoleAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All
+                    
+                    if ($appRoleAssignments) {
+                        $appsOutput += "Permisos de aplicación:`n"
+                        
+                        foreach ($assignment in $appRoleAssignments) {
+                            $resourceSp = Get-MgServicePrincipal -ServicePrincipalId $assignment.ResourceId -ErrorAction SilentlyContinue
+                            $resourceName = if ($resourceSp) { $resourceSp.DisplayName } else { $assignment.ResourceId }
+                            
+                            # Obtener el nombre del rol
+                            $roleName = "Desconocido"
+                            if ($resourceSp) {
+                                $role = $resourceSp.AppRoles | Where-Object { $_.Id -eq $assignment.AppRoleId }
+                                if ($role) {
+                                    $roleName = $role.DisplayName
+                                }
+                            }
+                            
+                            $appsOutput += "  - Recurso: $resourceName`n"
+                            $appsOutput += "    Rol: $roleName`n"
+                            
+                            # Verificar roles sensibles
+                            $sensitiveRoles = @("Directory.Read.All", "Directory.ReadWrite.All", "User.Read.All", "User.ReadWrite.All", "Mail.Read", "Mail.ReadWrite", "Files.Read", "Files.ReadWrite")
+                            
+                            if ($sensitiveRoles -contains $roleName) {
+                                $appsOutput += "    ⚠️ ALERTA: Rol sensible detectado: $roleName`n"
+                            }
+                        }
+                    }
                 }
             }
             catch {
-                $vmsOutput += "Error al verificar cifrado de disco: $_`n"
+                $appsOutput += "Error al obtener permisos: $_`n"
             }
             
-            $vmsOutput += "---`n"
+            $appsOutput += "---`n"
         }
     }
     
-    Write-Report -Section "CONFIGURACIÓN DE NETWORK SECURITY GROUPS" -Content $nsgsOutput
-    Write-Report -Section "CONFIGURACIÓN DE CUENTAS DE ALMACENAMIENTO" -Content $storageOutput
-    Write-Report -Section "CONFIGURACIÓN DE MÁQUINAS VIRTUALES" -Content $vmsOutput
-    Write-Log "Configuraciones de recursos revisadas correctamente" -Level "INFO"
+    # Obtener aplicaciones empresariales (service principals)
+    $servicePrincipals = Get-MgServicePrincipal -Filter "servicePrincipalType eq 'Application'" -All
+    
+    $spOutput = "APLICACIONES EMPRESARIALES (SERVICE PRINCIPALS):`n`n"
+    $spOutput += "Total de aplicaciones empresariales: $($servicePrincipals.Count)`n`n"
+    
+    # Verificar aplicaciones con consentimiento de administrador
+    $adminConsentApps = $servicePrincipals | Where-Object { $_.ServicePrincipalType -eq "Application" -and $_.AppRoleAssignmentRequired -eq $true }
+    $spOutput += "Aplicaciones que requieren consentimiento de administrador: $($adminConsentApps.Count)`n"
+    
+    # Verificar aplicaciones con acceso a la API de Graph
+    $graphResourceId = "00000003-0000-0000-c000-000000000000" # Microsoft Graph
+    $appsWithGraphAccess = @()
+    
+    foreach ($sp in $servicePrincipals) {
+        $graphPermissions = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All | 
+            Where-Object { $_.ResourceId -eq $graphResourceId }
+        
+        if ($graphPermissions) {
+            $appsWithGraphAccess += $sp
+        }
+    }
+    
+    $spOutput += "Aplicaciones con acceso a Microsoft Graph: $($appsWithGraphAccess.Count)`n"
+    
+    if ($appsWithGraphAccess.Count -gt 0) {
+        $spOutput += "`nAPLICACIONES CON ACCESO A MICROSOFT GRAPH:`n"
+        
+        foreach ($app in $appsWithGraphAccess) {
+            $spOutput += "  - $($app.DisplayName) (ID: $($app.AppId))`n"
+            
+            # Obtener permisos específicos de Graph
+            $graphPermissions = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $app.Id -All | 
+                Where-Object { $_.ResourceId -eq $graphResourceId }
+            
+            if ($graphPermissions) {
+                $spOutput += "    Permisos de Graph:`n"
+                
+                foreach ($permission in $graphPermissions) {
+                    # Obtener el nombre del rol
+                    $graphSp = Get-MgServicePrincipal -Filter "appId eq '00000003-0000-0000-c000-000000000000'" -ErrorAction SilentlyContinue
+                    $roleName = "Desconocido"
+                    
+                    if ($graphSp) {
+                        $role = $graphSp.AppRoles | Where-Object { $_.Id -eq $permission.AppRoleId }
+                        if ($role) {
+                            $roleName = $role.DisplayName
+                        }
+                    }
+                    
+                    $spOutput += "    - $roleName`n"
+                    
+                    # Verificar permisos de alto privilegio
+                    $highPrivilegePermissions = @(
+                        "Directory.Read.All", 
+                        "Directory.ReadWrite.All", 
+                        "User.Read.All", 
+                        "User.ReadWrite.All",
+                        "Group.Read.All",
+                        "Group.ReadWrite.All",
+                        "Application.Read.All",
+                        "Application.ReadWrite.All"
+                    )
+                    
+                    if ($highPrivilegePermissions -contains $roleName) {
+                        $spOutput += "      ⚠️ ALERTA: Permiso de alto privilegio`n"
+                    }
+                }
+            }
+            
+            $spOutput += "`n"
+        }
+    }
+    
+    Write-Report -Section "APLICACIONES Y PERMISOS" -Content "$appsOutput`n$spOutput"
+    Write-Log "Aplicaciones y permisos analizados correctamente" -Level "INFO"
 }
 catch {
-    Write-Log "Error al revisar configuraciones de recursos: $_" -Level "ERROR"
-    Write-Report -Section "CONFIGURACIÓN DE RECURSOS" -Content "Error al obtener información: $_"
+    Write-Log "Error al analizar aplicaciones y permisos: $_" -Level "ERROR"
+    Write-Report -Section "APLICACIONES Y PERMISOS" -Content "Error al obtener información: $_"
 }
 #endregion
 
-#region 7. Verificación de Configuraciones de Aplicaciones y APIs Expuestas
-Write-Log "7. Verificando configuraciones de aplicaciones y APIs expuestas..." -Level "INFO"
+#region 6. Análisis de Configuración de Seguridad
+Write-Log "6. Analizando configuración de seguridad..." -Level "INFO"
 
 try {
-    # Verificar si estamos conectados a Microsoft Graph
-    if (Get-Command Get-MgApplication -ErrorAction SilentlyContinue) {
-        # Obtener aplicaciones registradas
-        $applications = Get-MgApplication -All
+    # Obtener configuración de seguridad del directorio
+    $securityDefaults = Get-MgPolicyIdentitySecurityDefaultEnforcementPolicy
+    
+    $securityConfig = "CONFIGURACIÓN DE SEGURIDAD DEL DIRECTORIO:`n`n"
+    
+    # Verificar si los valores predeterminados de seguridad están habilitados
+    $securityConfig += "Valores predeterminados de seguridad: $(if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' })`n"
+    
+    if (-not $securityDefaults.IsEnabled) {
+        $securityConfig += "⚠️ ALERTA: Los valores predeterminados de seguridad están deshabilitados. Esto puede representar un riesgo si no hay políticas de acceso condicional configuradas adecuadamente.`n"
+    }
+    
+    # Intentar obtener configuración de contraseñas
+    try {
+        $passwordPolicy = Get-MgDirectorySettingTemplate | 
+            Where-Object { $_.DisplayName -eq "Password Rule Settings" } | 
+            Select-Object -First 1
         
-        if ($applications.Count -eq 0) {
-            $appsOutput = "No se encontraron aplicaciones registradas en Azure AD.`n"
-        }
-        else {
-            $appsOutput = "APLICACIONES REGISTRADAS EN AZURE AD:`n`n"
+        if ($passwordPolicy) {
+            $securityConfig += "`nPOLÍTICA DE CONTRASEÑAS:`n"
+            $securityConfig += "Plantilla: $($passwordPolicy.DisplayName)`n"
             
-            foreach ($app in $applications) {
-                $appsOutput += "Nombre: $($app.DisplayName)`n"
-                $appsOutput += "ID de aplicación: $($app.AppId)`n"
-                $appsOutput += "ID de objeto: $($app.Id)`n"
-                $appsOutput += "Fecha de creación: $($app.CreatedDateTime)`n"
+            # Intentar obtener configuración actual
+            $currentSettings = Get-MgDirectorySetting | 
+                Where-Object { $_.TemplateId -eq $passwordPolicy.Id } | 
+                Select-Object -First 1
+            
+            if ($currentSettings) {
+                $securityConfig += "Configuración actual:`n"
                 
-                # Verificar si la aplicación tiene secretos
-                if ($app.PasswordCredentials.Count -gt 0) {
-                    $appsOutput += "Secretos configurados: $($app.PasswordCredentials.Count)`n"
-                    
-                    foreach ($secret in $app.PasswordCredentials) {
-                        $expiryDate = $secret.EndDateTime
-                        $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
-                        
-                        $appsOutput += "  - Secreto expira el: $expiryDate (en $daysUntilExpiry días)`n"
-                        
-                        if ($daysUntilExpiry -lt 30) {
-                            $appsOutput += "    ⚠️ ALERTA: Este secreto expirará pronto`n"
-                        }
-                    }
+                foreach ($value in $currentSettings.Values) {
+                    $securityConfig += "  - $($value.Name): $($value.Value)`n"
                 }
-                else {
-                    $appsOutput += "Secretos configurados: 0`n"
-                }
-                
-                # Verificar si la aplicación tiene certificados
-                if ($app.KeyCredentials.Count -gt 0) {
-                    $appsOutput += "Certificados configurados: $($app.KeyCredentials.Count)`n"
-                    
-                    foreach ($cert in $app.KeyCredentials) {
-                        $expiryDate = $cert.EndDateTime
-                        $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
-                        
-                        $appsOutput += "  - Certificado expira el: $expiryDate (en $daysUntilExpiry días)`n"
-                        
-                        if ($daysUntilExpiry -lt 30) {
-                            $appsOutput += "    ⚠️ ALERTA: Este certificado expirará pronto`n"
-                        }
-                    }
-                }
-                else {
-                    $appsOutput += "Certificados configurados: 0`n"
-                }
-                
-                # Verificar permisos delegados
-                try {
-                    $appServicePrincipals = Get-MgServicePrincipal -Filter "appId eq '$($app.AppId)'"
-                    
-                    if ($appServicePrincipals) {
-                        $sp = $appServicePrincipals[0]
-                        $oauth2PermissionGrants = Get-MgServicePrincipalOauth2PermissionGrant -ServicePrincipalId $sp.Id -All
-                        
-                        if ($oauth2PermissionGrants) {
-                            $appsOutput += "Permisos delegados:`n"
-                            
-                            foreach ($grant in $oauth2PermissionGrants) {
-                                $resourceSp = Get-MgServicePrincipal -ServicePrincipalId $grant.ResourceId -ErrorAction SilentlyContinue
-                                $resourceName = if ($resourceSp) { $resourceSp.DisplayName } else { $grant.ResourceId }
-                                
-                                $appsOutput += "  - Recurso: $resourceName`n"
-                                $appsOutput += "    Alcances: $($grant.Scope)`n"
-                                
-                                # Verificar permisos sensibles
-                                $sensitiveScopes = @("Mail.Read", "Mail.ReadWrite", "Files.Read", "Files.ReadWrite", "Directory.Read.All", "Directory.ReadWrite.All", "User.Read.All", "User.ReadWrite.All")
-                                $grantedScopes = $grant.Scope -split " "
-                                
-                                foreach ($scope in $grantedScopes) {
-                                    if ($sensitiveScopes -contains $scope) {
-                                        $appsOutput += "    ⚠️ ALERTA: Permiso sensible detectado: $scope`n"
-                                    }
-                                }
-                            }
-                        }
-                        else {
-                            $appsOutput += "Permisos delegados: Ninguno`n"
-                        }
-                        
-                        # Verificar permisos de aplicación
-                        $appRoleAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All
-                        
-                        if ($appRoleAssignments) {
-                            $appsOutput += "Permisos de aplicación:`n"
-                            
-                            foreach ($assignment in $appRoleAssignments) {
-                                $resourceSp = Get-MgServicePrincipal -ServicePrincipalId $assignment.ResourceId -ErrorAction SilentlyContinue
-                                $resourceName = if ($resourceSp) { $resourceSp.DisplayName } else { $assignment.ResourceId }
-                                
-                                # Obtener el nombre del rol
-                                $roleName = "Desconocido"
-                                if ($resourceSp) {
-                                    $role = $resourceSp.AppRoles | Where-Object { $_.Id -eq $assignment.AppRoleId }
-                                    if ($role) {
-                                        $roleName = $role.DisplayName
-                                    }
-                                }
-                                
-                                $appsOutput += "  - Recurso: $resourceName`n"
-                                $appsOutput += "    Rol: $roleName`n"
-                                
-                                # Verificar roles sensibles
-                                $sensitiveRoles = @("Directory.Read.All", "Directory.ReadWrite.All", "User.Read.All", "User.ReadWrite.All", "Mail.Read", "Mail.ReadWrite", "Files.Read", "Files.ReadWrite")
-                                
-                                if ($sensitiveRoles -contains $roleName) {
-                                    $appsOutput += "    ⚠️ ALERTA: Rol sensible detectado: $roleName`n"
-                                }
-                            }
-                        }
-                        else {
-                            $appsOutput += "Permisos de aplicación: Ninguno`n"
-                        }
-                    }
-                }
-                catch {
-                    $appsOutput += "Error al obtener permisos: $_`n"
-                }
-                
-                $appsOutput += "---`n"
+            }
+            else {
+                $securityConfig += "No se encontró configuración personalizada de contraseñas. Se están utilizando los valores predeterminados.`n"
             }
         }
+        else {
+            $securityConfig += "`nNo se pudo obtener información sobre la política de contraseñas.`n"
+        }
+    }
+    catch {
+        $securityConfig += "`nError al obtener política de contraseñas: $_`n"
+    }
+    
+    # Verificar configuración de bloqueo de cuentas
+    try {
+        $authenticationStrengthPolicies = Get-MgPolicyAuthenticationStrengthPolicy
         
-        Write-Report -Section "APLICACIONES Y APIS EXPUESTAS" -Content $appsOutput
-        Write-Log "Configuraciones de aplicaciones y APIs expuestas verificadas correctamente" -Level "INFO"
+        if ($authenticationStrengthPolicies) {
+            $securityConfig += "`nPOLÍTICAS DE FUERZA DE AUTENTICACIÓN:`n"
+            
+            foreach ($policy in $authenticationStrengthPolicies) {
+                $securityConfig += "- $($policy.DisplayName)`n"
+                $securityConfig += "  Descripción: $($policy.Description)`n"
+                $securityConfig += "  Métodos permitidos: $($policy.AllowedCombinations -join ', ')`n"
+            }
+        }
     }
-    else {
-        Write-Log "No se pudo acceder a la información de aplicaciones. Verifique los permisos de Microsoft Graph" -Level "WARNING"
-        Write-Report -Section "APLICACIONES Y APIS EXPUESTAS" -Content "No se pudo acceder a la información de aplicaciones. Verifique los permisos de Microsoft Graph."
+    catch {
+        $securityConfig += "`nError al obtener políticas de fuerza de autenticación: $_`n"
     }
+    
+    # Verificar configuración de registro de auditoría
+    try {
+        $auditLogConfig = Get-MgPolicyAuditLogPolicy
+        
+        if ($auditLogConfig) {
+            $securityConfig += "`nCONFIGURACIÓN DE REGISTROS DE AUDITORÍA:`n"
+            $securityConfig += "Estado: $(if ($auditLogConfig.IsEnabled) { 'Habilitado' } else { 'Deshabilitado' })`n"
+            
+            if (-not $auditLogConfig.IsEnabled) {
+                $securityConfig += "⚠️ ALERTA: Los registros de auditoría están deshabilitados. Esto dificulta la detección y análisis de actividades sospechosas.`n"
+            }
+        }
+    }
+    catch {
+        $securityConfig += "`nError al obtener configuración de registros de auditoría: $_`n"
+    }
+    
+    Write-Report -Section "CONFIGURACIÓN DE SEGURIDAD" -Content $securityConfig
+    Write-Log "Configuración de seguridad analizada correctamente" -Level "INFO"
 }
 catch {
-    Write-Log "Error al verificar configuraciones de aplicaciones y APIs: $_" -Level "ERROR"
-    Write-Report -Section "APLICACIONES Y APIS EXPUESTAS" -Content "Error al obtener información: $_"
+    Write-Log "Error al analizar configuración de seguridad: $_" -Level "ERROR"
+    Write-Report -Section "CONFIGURACIÓN DE SEGURIDAD" -Content "Error al obtener información: $_"
 }
 #endregion
 
-#region 8. Reporte Final
-Write-Log "8. Generando reporte final..." -Level "INFO"
+#region 7. Reporte Final
+Write-Log "7. Generando reporte final..." -Level "INFO"
 
 try {
     # Generar resumen ejecutivo
     $resumenEjecutivo = @"
-RESUMEN EJECUTIVO DE AUDITORÍA DE SEGURIDAD
-===========================================
+RESUMEN EJECUTIVO DE AUDITORÍA DE SEGURIDAD DE MICROSOFT ENTRA ID
+================================================================
 
 Fecha de auditoría: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-Suscripción auditada: $($selectedSubscription.Name)
-Usuario que realizó la auditoría: $((Get-AzContext).Account.Id)
+Tenant: $($organization.DisplayName)
+Tenant ID: $($organization.Id)
 
 HALLAZGOS PRINCIPALES:
 
-1. ROLES Y PERMISOS:
-   - Total de asignaciones de roles: $($allRoleAssignments.Count)
-   - Roles del usuario actual: $($currentUserRoles.Count)
+1. USUARIOS Y ADMINISTRADORES:
+   - Total de usuarios: $($users.Count)
+   - Usuarios habilitados: $($enabledUsers.Count)
+   - Roles de administrador: $($directoryRoles.Count)
 
 2. ACCESO CONDICIONAL:
    - Políticas de acceso condicional: $(if ($conditionalAccessPolicies) { $conditionalAccessPolicies.Count } else { "No disponible" })
+   - Valores predeterminados de seguridad: $(if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' })
 
 3. MFA Y SEGURIDAD DE IDENTIDAD:
-   - Usuarios sin MFA: $(if ($users) { ($users | Where-Object { -not ($_.StrongAuthenticationMethods) }).Count } else { "No disponible" })
-   - Usuarios en riesgo: $(if ($riskyUsers) { $riskyUsers.Count } else { "No disponible" })
+   - Usuarios sin MFA: $usersWithoutMfa de $totalChecked verificados
+   - Administradores sin MFA: $adminsWithoutMfa
 
-4. ALERTAS DE SEGURIDAD:
-   - Alertas activas: $(if ($securityAlerts) { $securityAlerts.Count } else { 0 })
-
-5. CONFIGURACIÓN DE RECURSOS:
-   - Network Security Groups: $(if ($nsgs) { $nsgs.Count } else { 0 })
-   - Cuentas de almacenamiento: $(if ($storageAccounts) { $storageAccounts.Count } else { 0 })
-   - Máquinas virtuales: $(if ($vms) { $vms.Count } else { 0 })
-
-6. APLICACIONES Y APIS:
+4. APLICACIONES:
    - Aplicaciones registradas: $(if ($applications) { $applications.Count } else { "No disponible" })
+   - Aplicaciones con acceso a Graph: $(if ($appsWithGraphAccess) { $appsWithGraphAccess.Count } else { "No disponible" })
 
 RECOMENDACIONES GENERALES:
 
-1. Revisar las asignaciones de roles para asegurar el principio de mínimo privilegio.
-2. Implementar políticas de acceso condicional para todos los usuarios.
-3. Habilitar MFA para todos los usuarios, especialmente aquellos con roles privilegiados.
-4. Revisar y resolver todas las alertas de seguridad activas.
-5. Asegurar que todas las cuentas de almacenamiento tengan el acceso público deshabilitado.
-6. Verificar que todas las máquinas virtuales tengan los discos cifrados.
-7. Revisar los permisos de las aplicaciones registradas para eliminar permisos innecesarios.
+1. Implementar MFA para todos los usuarios, especialmente para cuentas de administrador.
+2. Revisar y configurar políticas de acceso condicional para proteger recursos críticos.
+3. Revisar permisos de aplicaciones, especialmente aquellas con permisos elevados.
+4. Habilitar valores predeterminados de seguridad si no hay políticas de acceso condicional configuradas.
+5. Revisar regularmente las asignaciones de roles administrativos para asegurar el principio de mínimo privilegio.
 
 Para más detalles, consulte las secciones específicas de este reporte.
 "@
@@ -863,7 +827,7 @@ Para más detalles, consulte las secciones específicas de este reporte.
     Write-Log "Log de la auditoría guardado en: $logFile" -Level "INFO"
     
     # Mostrar ubicación del reporte
-    Write-Host "`nLa auditoría de seguridad ha finalizado correctamente." -ForegroundColor Green
+    Write-Host "`nLa auditoría de seguridad de Microsoft Entra ID ha finalizado correctamente." -ForegroundColor Green
     Write-Host "El reporte completo se encuentra en: $reportFile" -ForegroundColor Cyan
     Write-Host "El log de la auditoría se encuentra en: $logFile" -ForegroundColor Cyan
 }
@@ -871,3 +835,7 @@ catch {
     Write-Log "Error al generar reporte final: $_" -Level "ERROR"
 }
 #endregion
+
+# Desconectar de Microsoft Graph
+Disconnect-MgGraph | Out-Null
+Write-Log "Desconectado de Microsoft Graph" -Level "INFO"
