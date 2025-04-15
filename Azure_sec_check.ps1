@@ -257,7 +257,7 @@ $htmlHeader = @"
         }
 
         .section h2::after {
-            content: "▼";
+            content: "\u25BC";
             margin-left: 10px;
             font-size: 12px;
             transition: transform 0.3s;
@@ -844,6 +844,9 @@ try {
                 if ($isCritical) {
                     $rolesSection += @"
                     <div class="alert">
+                          {
+                    $rolesSection += @"
+                    <div class="alert">
                         <span class="alert-icon">⚠️</span> Este es un rol crítico con altos privilegios
                     </div>
 "@
@@ -1026,45 +1029,96 @@ try {
 "@
     
     # Verificar si los valores predeterminados de seguridad están habilitados
-    if ($usingAzureAD) {
-        try {
-            # Intentar obtener configuración de valores predeterminados de seguridad
-            $securityDefaults = Get-AzureADMSIdentitySecurityDefaultsEnforcementPolicy -ErrorAction Stop
-            
-            if ($securityDefaults) {
-                $securityDefaultsStatus = if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' }
-                
-                $mfaSection += @"
-                <div class="summary-card">
-                    <h3>Valores Predeterminados de Seguridad</h3>
-                    <div class="stat">$securityDefaultsStatus</div>
-                    <div class="description">Estado de la configuración de seguridad predeterminada</div>
-                </div>
-"@
-                
-                if ($securityDefaults.IsEnabled) {
-                    $mfaSection += @"
-                <div class="success">
-                    <span class="success-icon">✓</span> BUENA PRÁCTICA: Los valores predeterminados de seguridad están habilitados, lo que requiere MFA para todos los usuarios.
-                </div>
-"@
-                }
-                else {
-                    $mfaSection += @"
-                <div class="alert">
-                    <span class="alert-icon">⚠️</span> ALERTA: Los valores predeterminados de seguridad están deshabilitados. Asegúrese de tener políticas de acceso condicional configuradas para requerir MFA.
-                </div>
-"@
+    $securityDefaultsEnabled = $false
+    $securityDefaultsStatus = "No se pudo determinar"
+
+    try {
+        # Intentar determinar el estado de Security Defaults indirectamente
+        # Verificamos si hay políticas de acceso condicional, lo que suele indicar que Security Defaults está deshabilitado
+        $hasConditionalAccessPolicies = $false
+        
+        if ($usingAzureAD) {
+            try {
+                # Intentar obtener políticas de acceso condicional si es posible
+                $conditionalAccessPolicies = Get-AzureADMSConditionalAccessPolicy -ErrorAction SilentlyContinue
+                if ($conditionalAccessPolicies -and $conditionalAccessPolicies.Count -gt 0) {
+                    $hasConditionalAccessPolicies = $true
                 }
             }
+            catch {
+                Write-Log "No se pudieron verificar las políticas de acceso condicional: $_" -Level "WARNING"
+            }
         }
-        catch {
+        
+        # Verificar si hay usuarios con MFA forzado, lo que podría indicar Security Defaults o políticas personalizadas
+        $mfaEnforcedCount = 0
+        
+        if (Get-Command Get-MsolUser -ErrorAction SilentlyContinue) {
+            $sampleUsers = Get-MsolUser -MaxResults 20 | Where-Object { $_.UserType -eq "Member" -and $_.BlockCredential -eq $false }
+            
+            foreach ($user in $sampleUsers) {
+                if ($user.StrongAuthenticationRequirements -and $user.StrongAuthenticationRequirements.Count -gt 0) {
+                    $mfaEnforcedCount++
+                }
+            }
+            
+            # Si más del 80% de los usuarios tienen MFA forzado, probablemente Security Defaults está habilitado
+            if ($sampleUsers.Count -gt 0 -and ($mfaEnforcedCount / $sampleUsers.Count) -gt 0.8) {
+                $securityDefaultsEnabled = $true
+                $securityDefaultsStatus = "Probablemente habilitados"
+            }
+            elseif ($hasConditionalAccessPolicies) {
+                $securityDefaultsEnabled = $false
+                $securityDefaultsStatus = "Probablemente deshabilitados (se detectaron políticas de acceso condicional)"
+            }
+            else {
+                $securityDefaultsStatus = "No se pudo determinar con certeza"
+            }
+        }
+        
+        $mfaSection += @"
+        <div class="summary-card">
+            <h3>Valores Predeterminados de Seguridad</h3>
+            <div class="stat">$securityDefaultsStatus</div>
+            <div class="description">Estado estimado de la configuración de seguridad predeterminada</div>
+        </div>
+"@
+        
+        $mfaSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> Nota: No se pudo verificar directamente el estado de los valores predeterminados de seguridad porque el cmdlet requiere Microsoft Graph. El estado mostrado es una estimación basada en otras configuraciones.
+        </div>
+"@
+        
+        if ($securityDefaultsEnabled) {
             $mfaSection += @"
-            <div class="info-box">
-                <span class="info-icon">ℹ️</span> No se pudo obtener información sobre los valores predeterminados de seguridad: $_
+            <div class="success">
+                <span class="success-icon">✓</span> BUENA PRÁCTICA: Los valores predeterminados de seguridad parecen estar habilitados, lo que requiere MFA para todos los usuarios.
             </div>
 "@
         }
+        elseif ($hasConditionalAccessPolicies) {
+            $mfaSection += @"
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> Se detectaron políticas de acceso condicional, lo que sugiere que se está utilizando un enfoque personalizado para la seguridad en lugar de los valores predeterminados.
+            </div>
+"@
+        }
+        else {
+            $mfaSection += @"
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> ALERTA: No se pudo confirmar si los valores predeterminados de seguridad están habilitados. Verifique manualmente en el portal de Azure AD.
+            </div>
+"@
+        }
+    }
+    catch {
+        Write-Log "No se pudo estimar el estado de los valores predeterminados de seguridad: $_" -Level "WARNING"
+        $mfaSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> No se pudo estimar el estado de los valores predeterminados de seguridad: $_
+        </div>
+"@
     }
     
     # Analizar estado de MFA por usuario
@@ -1073,80 +1127,62 @@ try {
         <h3>Estado de MFA por Usuario</h3>
 "@
     
-    # Obtener usuarios (limitado a 100 para evitar problemas de rendimiento)
-    if ($usingAzureAD) {
-        $usersToCheck = $users | Where-Object { $_.AccountEnabled -eq $true -and $_.UserType -eq "Member" } | Select-Object -First 100
-    }
-    else {
-        $usersToCheck = $users | Where-Object { $_.BlockCredential -eq $false -and $_.UserType -eq "Member" } | Select-Object -First 100
-    }
-    
-    $usersWithoutMfa = 0
-    $adminsWithoutMfa = 0
-    $totalChecked = 0
-    $usersWithoutMfaList = @()
-    
-    foreach ($user in $usersToCheck) {
-        $totalChecked++
-        
-        # Obtener estado de MFA
-        if ($usingAzureAD) {
-            # No hay método directo en AzureAD para verificar MFA, intentamos usar MSOnline si está disponible
-            if (Get-Command Get-MsolUser -ErrorAction SilentlyContinue) {
-                try {
-                    $mfaStatus = Get-MsolUser -UserPrincipalName $user.UserPrincipalName | Select-Object -ExpandProperty StrongAuthenticationRequirements
-                    
-                    if (-not $mfaStatus -or $mfaStatus.Count -eq 0) {
-                        $usersWithoutMfa++
-                        
-                        # Verificar si es administrador
-                        $isAdmin = $false
-                        foreach ($role in $directoryRoles) {
-                            $roleMembers = Get-AzureADDirectoryRoleMember -ObjectId $role.ObjectId
-                            if ($roleMembers | Where-Object { $_.ObjectId -eq $user.ObjectId }) {
-                                $isAdmin = $true
-                                $adminsWithoutMfa++
-                                break
-                            }
-                        }
-                        
-                        $usersWithoutMfaList += [PSCustomObject]@{
-                            DisplayName = $user.DisplayName
-                            UserPrincipalName = $user.UserPrincipalName
-                            IsAdmin = $isAdmin
-                        }
-                    }
-                }
-                catch {
-                    Write-Log "Error al verificar MFA para $($user.DisplayName): $_" -Level "WARNING"
-                }
+    # Verificar si tenemos el módulo MSOnline disponible para verificar MFA
+    $canCheckMFA = $false
+    if (Get-Module -ListAvailable -Name MSOnline) {
+        try {
+            # Intentar importar MSOnline si no está ya cargado
+            if (-not (Get-Module -Name MSOnline)) {
+                Import-Module MSOnline -ErrorAction Stop
             }
-            else {
-                $mfaSection += @"
-                <div class="info-box">
-                    <span class="info-icon">ℹ️</span> No se puede verificar el estado de MFA individual con el módulo AzureAD. Se requiere MSOnline.
-                </div>
-"@
-                break
-            }
+            $canCheckMFA = $true
         }
-        else {
-            # Usando MSOnline
-            try {
-                $mfaStatus = Get-MsolUser -UserPrincipalName $user.UserPrincipalName | Select-Object -ExpandProperty StrongAuthenticationRequirements
+        catch {
+            Write-Log "No se pudo cargar el módulo MSOnline para verificar MFA: $_" -Level "WARNING"
+            $canCheckMFA = $false
+        }
+    }
+    
+    if ($canCheckMFA) {
+        try {
+            # Asegurarse de que estamos conectados a MSOnline
+            if (-not (Get-MsolCompanyInformation -ErrorAction SilentlyContinue)) {
+                Write-Log "Conectando a MSOnline para verificar MFA..." -Level "INFO"
+                Connect-MsolService -ErrorAction Stop
+            }
+            
+            # Obtener usuarios (limitado a 100 para evitar problemas de rendimiento)
+            $usersToCheck = Get-MsolUser -All -MaxResults 100 | Where-Object { 
+                $_.UserType -eq "Member" -and $_.BlockCredential -eq $false 
+            }
+            
+            $totalChecked = 0
+            $usersWithoutMfa = 0
+            $adminsWithoutMfa = 0
+            $usersWithoutMfaList = @()
+            
+            foreach ($user in $usersToCheck) {
+                $totalChecked++
                 
-                if (-not $mfaStatus -or $mfaStatus.Count -eq 0) {
+                # Verificar estado de MFA
+                $mfaStatus = $user.StrongAuthenticationRequirements
+                $mfaEnabled = ($mfaStatus -ne $null -and $mfaStatus.Count -gt 0) -or 
+                              ($securityDefaultsEnabled -eq $true)
+                
+                if (-not $mfaEnabled) {
                     $usersWithoutMfa++
                     
                     # Verificar si es administrador
                     $isAdmin = $false
-                    foreach ($role in $directoryRoles) {
-                        $roleMembers = Get-MsolRoleMember -RoleObjectId $role.ObjectId
-                        if ($roleMembers | Where-Object { $_.EmailAddress -eq $user.UserPrincipalName }) {
+                    try {
+                        $userRoles = Get-MsolUserRole -UserPrincipalObjectId $user.ObjectId -ErrorAction SilentlyContinue
+                        if ($userRoles -and $userRoles.Count -gt 0) {
                             $isAdmin = $true
                             $adminsWithoutMfa++
-                            break
                         }
+                    }
+                    catch {
+                        Write-Log "Error al verificar roles para $($user.UserPrincipalName): $_" -Level "WARNING"
                     }
                     
                     $usersWithoutMfaList += [PSCustomObject]@{
@@ -1156,104 +1192,114 @@ try {
                     }
                 }
             }
-            catch {
-                Write-Log "Error al verificar MFA para $($user.DisplayName): $_" -Level "WARNING"
-            }
-        }
-    }
-    
-    # Añadir estadísticas de MFA
-    if ($totalChecked -gt 0) {
-        $mfaPercentage = [math]::Round((($totalChecked - $usersWithoutMfa) / $totalChecked) * 100)
-        
-        $mfaSection += @"
-        <div class="summary-grid">
-            <div class="summary-card">
-                <h3>Usuarios Verificados</h3>
-                <div class="stat">$totalChecked</div>
-                <div class="description">Número de usuarios analizados</div>
-            </div>
-            <div class="summary-card">
-                <h3>Usuarios sin MFA</h3>
-                <div class="stat">$usersWithoutMfa</div>
-                <div class="description">Usuarios que no tienen MFA configurado</div>
-            </div>
-            <div class="summary-card">
-                <h3>Administradores sin MFA</h3>
-                <div class="stat">$adminsWithoutMfa</div>
-                <div class="description">Administradores sin protección MFA</div>
-            </div>
-            <div class="summary-card">
-                <h3>Adopción de MFA</h3>
-                <div class="stat">$mfaPercentage%</div>
-                <div class="description">Porcentaje de usuarios con MFA</div>
-            </div>
-        </div>
-        
-        <div class="chart-container">
-            <h3>Estado de MFA</h3>
-            <div class="pie-chart" style="--primary-percentage: ${mfaPercentage}%;"></div>
-            <div class="pie-legend">
-                <div class="legend-item">
-                    <div class="legend-color" style="background-color: var(--primary-color);"></div>
-                    <span>Con MFA ($mfaPercentage%)</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background-color: var(--warning-color);"></div>
-                    <span>Sin MFA ($(100 - $mfaPercentage)%)</span>
-                </div>
-            </div>
-        </div>
-"@
-        
-        if ($adminsWithoutMfa -gt 0) {
-            $mfaSection += @"
-        <div class="alert">
-            <span class="alert-icon">⚠️</span> ALERTA CRÍTICA: Hay administradores sin MFA configurado. Esto representa un riesgo de seguridad significativo.
-        </div>
-"@
-        }
-        
-        if ($usersWithoutMfa / $totalChecked -gt 0.5) {
-            $mfaSection += @"
-        <div class="alert">
-            <span class="alert-icon">⚠️</span> ALERTA: Más del 50% de los usuarios no tienen MFA configurado.
-        </div>
-"@
-        }
-        
-        # Mostrar lista de usuarios sin MFA
-        if ($usersWithoutMfaList.Count -gt 0) {
-            $mfaSection += @"
-        <div class="divider"></div>
-        <h3>Usuarios sin MFA Configurado</h3>
-        <table>
-            <tr>
-                <th>Nombre</th>
-                <th>Correo</th>
-                <th>Administrador</th>
-            </tr>
-"@
             
-            foreach ($user in $usersWithoutMfaList) {
-                $adminIcon = if ($user.IsAdmin) { "⚠️" } else { "" }
+            # Añadir estadísticas de MFA
+            if ($totalChecked -gt 0) {
+                $mfaPercentage = [math]::Round((($totalChecked - $usersWithoutMfa) / $totalChecked) * 100)
                 
                 $mfaSection += @"
-            <tr>
-                <td>$($user.DisplayName)</td>
-                <td>$($user.UserPrincipalName)</td>
-                <td>$adminIcon</td>
-            </tr>
+                <div class="summary-grid">
+                    <div class="summary-card">
+                        <h3>Usuarios Verificados</h3>
+                        <div class="stat">$totalChecked</div>
+                        <div class="description">Número de usuarios analizados</div>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Usuarios sin MFA</h3>
+                        <div class="stat">$usersWithoutMfa</div>
+                        <div class="description">Usuarios que no tienen MFA configurado</div>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Administradores sin MFA</h3>
+                        <div class="stat">$adminsWithoutMfa</div>
+                        <div class="description">Administradores sin MFA</div>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Adopción de MFA</h3>
+                        <div class="stat">$mfaPercentage%</div>
+                        <div class="description">Porcentaje de usuarios con MFA</div>
+                    </div>
+                </div>
+                
+                <div class="chart-container">
+                    <h3>Estado de MFA</h3>
+                    <div class="pie-chart" style="--primary-percentage: ${mfaPercentage}%;">
+                    </div>
+                    <div class="pie-legend">
+                        <div class="legend-item">
+                            <div class="legend-color" style="background-color: var(--primary-color);"></div>
+                            <span>Con MFA ($mfaPercentage%)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color" style="background-color: var(--warning-color);"></div>
+                            <span>Sin MFA ($(100 - $mfaPercentage)%)</span>
+                        </div>
+                    </div>
+                </div>
 "@
+                
+                if ($adminsWithoutMfa -gt 0) {
+                    $mfaSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA CRÍTICA: Hay $adminsWithoutMfa administradores sin MFA configurado. Esto representa un riesgo de seguridad significativo.
+                </div>
+"@
+                }
+                
+                if ($usersWithoutMfa / $totalChecked -gt 0.5) {
+                    $mfaSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA: Más del 50% de los usuarios no tienen MFA configurado.
+                </div>
+"@
+                }
+                
+                # Mostrar lista de usuarios sin MFA
+                if ($usersWithoutMfaList.Count -gt 0) {
+                    $mfaSection += @"
+                <div class="divider"></div>
+                <h3>Usuarios sin MFA configurado</h3>
+                <table>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>Correo</th>
+                        <th>Administrador</th>
+                    </tr>
+"@
+                    
+                    foreach ($user in $usersWithoutMfaList) {
+                        $adminIcon = if ($user.IsAdmin) { "⚠️ Sí" } else { "No" }
+                        $rowClass = if ($user.IsAdmin) { ' class="alert"' } else { '' }
+                        
+                        $mfaSection += @"
+                    <tr$rowClass>
+                        <td>$($user.DisplayName)</td>
+                        <td>$($user.UserPrincipalName)</td>
+                        <td>$adminIcon</td>
+                    </tr>
+"@
+                    }
+                    
+                    $mfaSection += "</table>"
+                }
             }
-            
-            $mfaSection += "</table>"
+        }
+        catch {
+            Write-Log "Error al verificar el estado de MFA: $_" -Level "ERROR"
+            $mfaSection += @"
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al verificar el estado de MFA: $_
+            </div>
+"@
         }
     }
     else {
         $mfaSection += @"
         <div class="info-box">
-            <span class="info-icon">ℹ️</span> No se pudo verificar el estado de MFA para ningún usuario.
+            <span class="info-icon">ℹ️</span> No se puede verificar el estado de MFA de los usuarios porque el módulo MSOnline no está disponible o no se pudo cargar.
+        </div>
+        <div class="alert">
+            <span class="alert-icon">⚠️</span> Recomendación: Instale el módulo MSOnline con el comando <code>Install-Module MSOnline</code> para habilitar la verificación de MFA.
         </div>
 "@
     }
@@ -1273,7 +1319,7 @@ catch {
         <h2>Configuración de MFA</h2>
         <div class="section-content">
             <div class="alert">
-                <span class="alert-icon">⚠️</span> Error al obtener información: $_
+                <span class="alert-icon">⚠️</span> Error al obtener información de MFA: $_
             </div>
         </div>
     </div>
@@ -1293,124 +1339,206 @@ try {
     
     # Obtener aplicaciones registradas
     if ($usingAzureAD) {
-        $applications = Get-AzureADApplication -All $true
-        
-        if ($applications.Count -eq 0) {
-            $aplicacionesSection += @"
-            <div class="info-box">
-                <span class="info-icon">ℹ️</span> No se encontraron aplicaciones registradas en Azure AD.
-            </div>
-"@
-        }
-        else {
-            $aplicacionesSection += @"
-            <div class="summary-card">
-                <h3>Aplicaciones Registradas</h3>
-                <div class="stat">$($applications.Count)</div>
-                <div class="description">Total de aplicaciones registradas en Azure AD</div>
-            </div>
+        try {
+            $applications = Get-AzureADApplication -All $true -ErrorAction Stop
             
-            <div class="divider"></div>
-            <h3>Aplicaciones con Secretos o Certificados</h3>
-            <table>
-                <tr>
-                    <th>Nombre</th>
-                    <th>Secretos</th>
-                    <th>Certificados</th>
-                    <th>Próxima Expiración</th>
-                </tr>
+            if ($applications.Count -eq 0) {
+                $aplicacionesSection += @"
+                <div class="info-box">
+                    <span class="info-icon">ℹ️</span> No se encontraron aplicaciones registradas en Azure AD.
+                </div>
 "@
-            
-            foreach ($app in $applications) {
-                # Verificar si la aplicación tiene secretos
-                $appCredentials = Get-AzureADApplicationPasswordCredential -ObjectId $app.ObjectId
-                $appCertificates = Get-AzureADApplicationKeyCredential -ObjectId $app.ObjectId
+            }
+            else {
+                $aplicacionesSection += @"
+                <div class="summary-card">
+                    <h3>Aplicaciones Registradas</h3>
+                    <div class="stat">$($applications.Count)</div>
+                    <div class="description">Total de aplicaciones registradas en Azure AD</div>
+                </div>
                 
-                if ($appCredentials.Count -gt 0 -or $appCertificates.Count -gt 0) {
-                    # Encontrar la fecha de expiración más cercana
-                    $nextExpiry = $null
-                    $daysUntilExpiry = 9999
+                <div class="divider"></div>
+                <h3>Aplicaciones Registradas</h3>
+                <table>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>ID de Aplicación</th>
+                        <th>Fecha de Creación</th>
+                    </tr>
+"@
+                
+                # Mostrar solo las primeras 20 aplicaciones para evitar que el reporte sea demasiado grande
+                foreach ($app in $applications | Select-Object -First 20) {
+                    $creationDate = if ($app.CreatedDateTime) { $app.CreatedDateTime.ToString("dd/MM/yyyy") } else { "Desconocida" }
                     
-                    foreach ($cred in $appCredentials) {
-                        $expiryDate = $cred.EndDate
-                        $days = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
+                    $aplicacionesSection += @"
+                    <tr>
+                        <td>$($app.DisplayName)</td>
+                        <td>$($app.AppId)</td>
+                        <td>$creationDate</td>
+                    </tr>
+"@
+                }
+                
+                $aplicacionesSection += "</table>"
+                
+                if ($applications.Count > 20) {
+                    $aplicacionesSection += @"
+                    <div class="info-box">
+                        <span class="info-icon">ℹ️</span> Se muestran solo las primeras 20 aplicaciones de un total de $($applications.Count).
+                    </div>
+"@
+                }
+                
+                # Intentar obtener información sobre secretos y certificados
+                try {
+                    $appsWithSecrets = 0
+                    $appsWithCerts = 0
+                    $appsWithExpiringCredentials = 0
+                    
+                    foreach ($app in $applications) {
+                        $appCredentials = Get-AzureADApplicationPasswordCredential -ObjectId $app.ObjectId -ErrorAction SilentlyContinue
+                        $appCertificates = Get-AzureADApplicationKeyCredential -ObjectId $app.ObjectId -ErrorAction SilentlyContinue
                         
-                        if ($days -lt $daysUntilExpiry) {
-                            $nextExpiry = $expiryDate
-                            $daysUntilExpiry = $days
+                        if ($appCredentials -and $appCredentials.Count -gt 0) {
+                            $appsWithSecrets++
+                            
+                            # Verificar si hay secretos que expiran pronto
+                            foreach ($cred in $appCredentials) {
+                                $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $cred.EndDate).Days
+                                if ($daysUntilExpiry -lt 30) {
+                                    $appsWithExpiringCredentials++
+                                    break
+                                }
+                            }
                         }
-                    }
-                    
-                    foreach ($cert in $appCertificates) {
-                        $expiryDate = $cert.EndDate
-                        $days = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
                         
-                        if ($days -lt $daysUntilExpiry) {
-                            $nextExpiry = $expiryDate
-                            $daysUntilExpiry = $days
+                        if ($appCertificates -and $appCertificates.Count -gt 0) {
+                            $appsWithCerts++
+                            
+                            # Verificar si hay certificados que expiran pronto
+                            foreach ($cert in $appCertificates) {
+                                $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $cert.EndDate).Days
+                                if ($daysUntilExpiry -lt 30) {
+                                    $appsWithExpiringCredentials++
+                                    break
+                                }
+                            }
                         }
-                    }
-                    
-                    $expiryClass = ""
-                    if ($daysUntilExpiry -lt 30) {
-                        $expiryClass = "style='color: var(--warning-color); font-weight: bold;'"
                     }
                     
                     $aplicacionesSection += @"
-                <tr>
-                    <td>$($app.DisplayName)</td>
-                    <td>$($appCredentials.Count)</td>
-                    <td>$($appCertificates.Count)</td>
-                    <td $expiryClass>$($nextExpiry.ToString("dd/MM/yyyy")) ($daysUntilExpiry días)</td>
-                </tr>
+                    <div class="divider"></div>
+                    <h3>Resumen de Credenciales</h3>
+                    <div class="summary-grid">
+                        <div class="summary-card">
+                            <h3>Aplicaciones con Secretos</h3>
+                            <div class="stat">$appsWithSecrets</div>
+                            <div class="description">Aplicaciones que utilizan secretos para autenticación</div>
+                        </div>
+                        <div class="summary-card">
+                            <h3>Aplicaciones con Certificados</h3>
+                            <div class="stat">$appsWithCerts</div>
+                            <div class="description">Aplicaciones que utilizan certificados para autenticación</div>
+                        </div>
+                        <div class="summary-card">
+                            <h3>Credenciales por Expirar</h3>
+                            <div class="stat">$appsWithExpiringCredentials</div>
+                            <div class="description">Aplicaciones con credenciales que expiran en menos de 30 días</div>
+                        </div>
+                    </div>
+"@
+                    
+                    if ($appsWithExpiringCredentials -gt 0) {
+                        $aplicacionesSection += @"
+                        <div class="alert">
+                            <span class="alert-icon">⚠️</span> ALERTA: Hay $appsWithExpiringCredentials aplicaciones con credenciales que expirarán en menos de 30 días. Revise y renueve estas credenciales para evitar interrupciones.
+                        </div>
+"@
+                    }
+                }
+                catch {
+                    Write-Log "Error al analizar credenciales de aplicaciones: $_" -Level "WARNING"
+                    $aplicacionesSection += @"
+                    <div class="info-box">
+                        <span class="info-icon">ℹ️</span> No se pudo obtener información detallada sobre credenciales de aplicaciones: $_
+                    </div>
 "@
                 }
             }
             
-            $aplicacionesSection += "</table>"
-        }
-        
-        # Obtener aplicaciones empresariales (service principals)
-        $servicePrincipals = Get-AzureADServicePrincipal -All $true | Where-Object { $_.ServicePrincipalType -eq "Application" }
-        
-        $aplicacionesSection += @"
-        <div class="divider"></div>
-        <h3>Aplicaciones Empresariales</h3>
-        <div class="summary-card">
-            <h3>Total de Aplicaciones Empresariales</h3>
-            <div class="stat">$($servicePrincipals.Count)</div>
-            <div class="description">Service Principals de tipo Aplicación</div>
-        </div>
-"@
-        
-        # Mostrar algunas aplicaciones empresariales importantes
-        $importantSps = $servicePrincipals | Where-Object { 
-            $_.DisplayName -like "*Microsoft*" -or 
-            $_.DisplayName -like "*Azure*" -or 
-            $_.DisplayName -like "*Office*" -or 
-            $_.DisplayName -like "*Graph*" 
-        } | Select-Object -First 10
-        
-        if ($importantSps.Count -gt 0) {
-            $aplicacionesSection += @"
-        <h4>Aplicaciones Empresariales Destacadas</h4>
-        <ul>
-"@
-            
-            foreach ($sp in $importantSps) {
+            # Obtener aplicaciones empresariales (service principals)
+            try {
+                $servicePrincipals = Get-AzureADServicePrincipal -All $true -ErrorAction Stop | 
+                    Where-Object { $_.ServicePrincipalType -eq "Application" }
+                
                 $aplicacionesSection += @"
-            <li>$($sp.DisplayName) (ID: $($sp.AppId))</li>
+                <div class="divider"></div>
+                <h3>Aplicaciones Empresariales</h3>
+                <div class="summary-card">
+                    <h3>Total de Aplicaciones Empresariales</h3>
+                    <div class="stat">$($servicePrincipals.Count)</div>
+                    <div class="description">Service Principals de tipo Aplicación</div>
+                </div>
+"@
+                
+                # Mostrar algunas aplicaciones empresariales importantes
+                $importantSps = $servicePrincipals | Where-Object { 
+                    $_.DisplayName -like "*Microsoft*" -or 
+                    $_.DisplayName -like "*Azure*" -or 
+                    $_.DisplayName -like "*Office*" -or 
+                    $_.DisplayName -like "*Graph*" 
+                } | Select-Object -First 10
+                
+                if ($importantSps.Count -gt 0) {
+                    $aplicacionesSection += @"
+                <h4>Aplicaciones Empresariales Destacadas</h4>
+                <table>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>ID de Aplicación</th>
+                    </tr>
+"@
+                    
+                    foreach ($sp in $importantSps) {
+                        $aplicacionesSection += @"
+                    <tr>
+                        <td>$($sp.DisplayName)</td>
+                        <td>$($sp.AppId)</td>
+                    </tr>
+"@
+                    }
+                    
+                    $aplicacionesSection += "</table>"
+                }
+            }
+            catch {
+                Write-Log "Error al obtener aplicaciones empresariales: $_" -Level "WARNING"
+                $aplicacionesSection += @"
+                <div class="info-box">
+                    <span class="info-icon">ℹ️</span> No se pudo obtener información sobre aplicaciones empresariales: $_
+                </div>
 "@
             }
-            
-            $aplicacionesSection += "</ul>"
+        }
+        catch {
+            Write-Log "Error al obtener aplicaciones registradas: $_" -Level "WARNING"
+            $aplicacionesSection += @"
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al obtener aplicaciones registradas: $_
+            </div>
+"@
         }
     }
     else {
         # Usando MSOnline - capacidades limitadas para aplicaciones
         $aplicacionesSection += @"
         <div class="info-box">
-            <span class="info-icon">ℹ️</span> No se puede obtener información detallada sobre aplicaciones registradas con el módulo MSOnline. Para un análisis completo de aplicaciones, utilice el módulo AzureAD o Microsoft Graph.
+            <span class="info-icon">ℹ️</span> No se puede obtener información detallada sobre aplicaciones registradas con el módulo MSOnline. Para un análisis completo de aplicaciones, utilice el módulo AzureAD.
+        </div>
+        
+        <div class="alert">
+            <span class="alert-icon">⚠️</span> Recomendación: Para analizar aplicaciones, instale el módulo AzureAD con el comando <code>Install-Module AzureAD</code> y ejecute nuevamente el script.
         </div>
 "@
     }
@@ -1448,51 +1576,19 @@ try {
         <div class="section-content">
 "@
     
-    # Verificar si los valores predeterminados de seguridad están habilitados
-    if ($usingAzureAD) {
-        try {
-            $securityDefaults = Get-AzureADMSIdentitySecurityDefaultsEnforcementPolicy -ErrorAction Stop
-            
-            if ($securityDefaults) {
-                $securityDefaultsStatus = if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' }
-                
-                $seguridadSection += @"
-                <div class="summary-card">
-                    <h3>Valores Predeterminados de Seguridad</h3>
-                    <div class="stat">$securityDefaultsStatus</div>
-                    <div class="description">Estado de la configuración de seguridad predeterminada</div>
-                </div>
-"@
-                
-                if (-not $securityDefaults.IsEnabled) {
-                    $seguridadSection += @"
-                <div class="alert">
-                    <span class="alert-icon">⚠️</span> ALERTA: Los valores predeterminados de seguridad están deshabilitados. Esto puede representar un riesgo si no hay políticas de acceso condicional configuradas adecuadamente.
-                </div>
-"@
-                }
-            }
-        }
-        catch {
-            $seguridadSection += @"
-            <div class="info-box">
-                <span class="info-icon">ℹ️</span> No se pudo obtener información sobre los valores predeterminados de seguridad: $_
-            </div>
-"@
-        }
-    }
-    else {
-        $seguridadSection += @"
-        <div class="info-box">
-            <span class="info-icon">ℹ️</span> No se puede verificar la configuración de valores predeterminados de seguridad con el módulo MSOnline.
+    # Referencia al estado de Security Defaults estimado anteriormente
+    $seguridadSection += @"
+        <div class="summary-card">
+            <h3>Valores Predeterminados de Seguridad</h3>
+            <div class="stat">$securityDefaultsStatus</div>
+            <div class="description">Estado estimado de la configuración de seguridad predeterminada</div>
         </div>
 "@
-    }
     
     # Verificar configuración de contraseñas
     if (-not $usingAzureAD) {
         try {
-            $passwordPolicy = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain
+            $passwordPolicy = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain -ErrorAction Stop
             
             $seguridadSection += @"
             <div class="divider"></div>
@@ -1514,7 +1610,8 @@ try {
             
             # Obtener configuración de complejidad de contraseñas
             try {
-                $strongPasswordRequired = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain | Select-Object -ExpandProperty StrongPasswordRequired
+                $strongPasswordRequired = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain | 
+                    Select-Object -ExpandProperty StrongPasswordRequired -ErrorAction Stop
                 
                 $seguridadSection += @"
                 <tr>
@@ -1558,6 +1655,7 @@ try {
             }
         }
         catch {
+            Write-Log "Error al obtener política de contraseñas: $_" -Level "WARNING"
             $seguridadSection += @"
             <div class="info-box">
                 <span class="info-icon">ℹ️</span> Error al obtener política de contraseñas: $_
@@ -1565,6 +1663,27 @@ try {
 "@
         }
     }
+    else {
+        $seguridadSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> La información detallada sobre políticas de contraseñas no está disponible con el módulo AzureAD estándar. Para obtener esta información, utilice el módulo MSOnline.
+        </div>
+"@
+    }
+    
+    # Añadir información sobre mejores prácticas de seguridad
+    $seguridadSection += @"
+    <div class="divider"></div>
+    <h3>Recomendaciones de Seguridad</h3>
+    <ul>
+        <li>Habilitar MFA para todos los usuarios, especialmente para cuentas de administrador</li>
+        <li>Implementar políticas de acceso condicional para proteger recursos críticos</li>
+        <li>Revisar regularmente los permisos de aplicaciones y roles de administrador</li>
+        <li>Monitorear y responder a alertas de seguridad</li>
+        <li>Implementar políticas de contraseñas seguras</li>
+        <li>Realizar auditorías de seguridad periódicas</li>
+    </ul>
+"@
     
     $seguridadSection += @"
         </div>
@@ -1598,7 +1717,7 @@ try {
     $enabledUsersCount = $enabledUsers.Count
     $totalRoles = $directoryRoles.Count
     $policiesCount = if ($conditionalAccessPolicies) { $conditionalAccessPolicies.Count } else { "No disponible" }
-    $securityDefaultsEnabled = if ($securityDefaults.IsEnabled) { "Sí" } else { "No" }
+    $securityDefaultsEnabled = if ($securityDefaultsEnabled) { "Sí" } else { "No" }
     $usersWithMfaPercentage = if ($totalChecked -gt 0) { [math]::Round((($totalChecked - $usersWithoutMfa) / $totalChecked) * 100) } else { 0 }
     $applicationsCount = if ($applications) { $applications.Count } else { "No disponible" }
     
@@ -1693,7 +1812,9 @@ catch {
 
 # Generar el archivo HTML completo
 $fullHtml = $htmlHeader + $htmlContent + $htmlFooter
-Set-Content -Path $reportFile -Value $fullHtml
+
+# Guardar el archivo HTML con codificación UTF-8
+[System.IO.File]::WriteAllText($reportFile, $fullHtml, [System.Text.Encoding]::UTF8)
 
 # Desconectar sesiones
 if ($usingAzureAD) {
