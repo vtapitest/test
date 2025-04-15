@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Script de auditoría de seguridad para Microsoft Entra ID (Azure AD) sin usar Microsoft Graph.
+    Script de auditoría de seguridad para Microsoft Entra ID (Azure AD) con reporte HTML.
 .DESCRIPTION
     Este script realiza una auditoría de seguridad básica en Microsoft Entra ID utilizando
-    los módulos MSOnline o AzureAD, sin requerir acceso a Microsoft Graph.
+    los módulos MSOnline o AzureAD, y genera un reporte HTML con estilos y buena presentación.
 .NOTES
     Requisitos:
     - Módulos MSOnline o AzureAD
@@ -23,25 +23,8 @@ if (-not (Test-Path -Path $reportFolder)) {
     New-Item -ItemType Directory -Path $reportFolder | Out-Null
 }
 
-$reportFile = "$reportFolder\EntraIDSecurityAuditReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$reportFile = "$reportFolder\EntraIDSecurityAuditReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
 $logFile = "$reportFolder\EntraIDSecurityAuditLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-
-# Función para escribir en el reporte
-function Write-Report {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Section,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$Content
-    )
-    
-    $separator = "=" * 80
-    $sectionHeader = "`n$separator`n$Section`n$separator`n"
-    
-    Add-Content -Path $reportFile -Value $sectionHeader
-    Add-Content -Path $reportFile -Value $Content
-}
 
 # Función para escribir en el log
 function Write-Log {
@@ -65,6 +48,480 @@ function Write-Log {
         "ERROR" { Write-Host $logEntry -ForegroundColor Red }
     }
 }
+
+# Inicializar el HTML
+$htmlHeader = @"
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auditoría de Seguridad de Microsoft Entra ID</title>
+    <style>
+        :root {
+            --primary-color: #0078d4;
+            --secondary-color: #106ebe;
+            --accent-color: #ffaa44;
+            --warning-color: #d13438;
+            --success-color: #107c10;
+            --info-color: #0078d4;
+            --bg-color: #f9f9f9;
+            --card-bg: #ffffff;
+            --text-color: #323130;
+            --text-light: #605e5c;
+            --border-color: #edebe9;
+            --hover-color: #f3f2f1;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            padding: 0;
+            margin: 0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 20px 0;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        header .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+        }
+
+        .header-title h1 {
+            font-size: 24px;
+            margin-left: 15px;
+        }
+
+        .header-meta {
+            text-align: right;
+            font-size: 14px;
+        }
+
+        .logo {
+            width: 40px;
+            height: 40px;
+            background-color: white;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary-color);
+            font-weight: bold;
+            font-size: 20px;
+        }
+
+        .toc {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .toc h2 {
+            margin-bottom: 15px;
+            color: var(--primary-color);
+            font-size: 18px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        .toc ul {
+            list-style-type: none;
+        }
+
+        .toc li {
+            margin-bottom: 8px;
+        }
+
+        .toc a {
+            color: var(--primary-color);
+            text-decoration: none;
+            display: block;
+            padding: 5px 10px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+
+        .toc a:hover {
+            background-color: var(--hover-color);
+        }
+
+        .executive-summary {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .executive-summary h2 {
+            color: var(--primary-color);
+            margin-bottom: 20px;
+            font-size: 20px;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .summary-card {
+            background-color: var(--hover-color);
+            border-radius: 8px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .summary-card h3 {
+            font-size: 16px;
+            margin-bottom: 10px;
+            color: var(--text-color);
+        }
+
+        .summary-card .stat {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: var(--primary-color);
+        }
+
+        .summary-card .description {
+            font-size: 14px;
+            color: var(--text-light);
+            flex-grow: 1;
+        }
+
+        .recommendations {
+            margin-top: 20px;
+        }
+
+        .recommendations h3 {
+            font-size: 16px;
+            margin-bottom: 10px;
+            color: var(--text-color);
+        }
+
+        .recommendations ol {
+            padding-left: 20px;
+        }
+
+        .recommendations li {
+            margin-bottom: 8px;
+        }
+
+        .section {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .section h2 {
+            color: var(--primary-color);
+            margin-bottom: 20px;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .section h2::after {
+            content: "▼";
+            margin-left: 10px;
+            font-size: 12px;
+            transition: transform 0.3s;
+        }
+
+        .section.collapsed h2::after {
+            transform: rotate(-90deg);
+        }
+
+        .section.collapsed .section-content {
+            display: none;
+        }
+
+        .section-content {
+            transition: all 0.3s;
+        }
+
+        .alert {
+            background-color: #fdefe3;
+            border-left: 4px solid var(--warning-color);
+            padding: 10px 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+
+        .alert-icon {
+            color: var(--warning-color);
+            margin-right: 10px;
+        }
+
+        .success {
+            background-color: #e7f6e7;
+            border-left: 4px solid var(--success-color);
+            padding: 10px 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+
+        .success-icon {
+            color: var(--success-color);
+            margin-right: 10px;
+        }
+
+        .info-box {
+            background-color: #e5f0f8;
+            border-left: 4px solid var(--info-color);
+            padding: 10px 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+
+        .info-icon {
+            color: var(--info-color);
+            margin-right: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: var(--hover-color);
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background-color: var(--hover-color);
+        }
+
+        .chart-container {
+            margin: 20px 0;
+            height: 250px;
+            position: relative;
+        }
+
+        .bar-chart {
+            display: flex;
+            align-items: flex-end;
+            height: 200px;
+            gap: 10px;
+        }
+
+        .bar {
+            flex-grow: 1;
+            background-color: var(--primary-color);
+            min-width: 40px;
+            position: relative;
+            border-radius: 4px 4px 0 0;
+            transition: height 0.5s;
+        }
+
+        .bar-label {
+            position: absolute;
+            bottom: -25px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 12px;
+        }
+
+        .bar-value {
+            position: absolute;
+            top: -25px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .pie-chart {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            background: conic-gradient(var(--primary-color) 0% var(--primary-percentage), var(--warning-color) var(--primary-percentage) 100%);
+            margin: 0 auto;
+        }
+
+        .pie-legend {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+            gap: 20px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+        }
+
+        .legend-color {
+            width: 15px;
+            height: 15px;
+            border-radius: 3px;
+            margin-right: 8px;
+        }
+
+        .divider {
+            height: 1px;
+            background-color: var(--border-color);
+            margin: 20px 0;
+        }
+
+        .role-card {
+            background-color: var(--hover-color);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .role-card h3 {
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+
+        .role-card p {
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        .role-card ul {
+            list-style-type: none;
+            margin-left: 15px;
+        }
+
+        .role-card li {
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+
+        .critical-role {
+            border-left: 4px solid var(--warning-color);
+        }
+
+        footer {
+            text-align: center;
+            padding: 20px;
+            margin-top: 30px;
+            color: var(--text-light);
+            font-size: 14px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 15px;
+            }
+            
+            header .container {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .header-meta {
+                text-align: left;
+                margin-top: 10px;
+            }
+            
+            .summary-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="header-title">
+                <div class="logo">E</div>
+                <h1>Auditoría de Seguridad de Microsoft Entra ID</h1>
+            </div>
+            <div class="header-meta">
+                <div>Fecha: $(Get-Date -Format "dd/MM/yyyy HH:mm")</div>
+                <div>Generado por: PowerShell Security Audit</div>
+            </div>
+        </div>
+    </header>
+    
+    <div class="container">
+        <div class="toc">
+            <h2>Tabla de Contenidos</h2>
+            <ul>
+                <li><a href="#resumen">Resumen Ejecutivo</a></li>
+                <li><a href="#tenant">Información del Tenant</a></li>
+                <li><a href="#usuarios">Estadísticas de Usuarios</a></li>
+                <li><a href="#roles">Roles de Administrador</a></li>
+                <li><a href="#acceso">Políticas de Acceso Condicional</a></li>
+                <li><a href="#mfa">Configuración de MFA</a></li>
+                <li><a href="#aplicaciones">Aplicaciones y Permisos</a></li>
+                <li><a href="#seguridad">Configuración de Seguridad</a></li>
+            </ul>
+        </div>
+"@
+
+$htmlFooter = @"
+        <footer>
+            <p>Reporte de Auditoría de Seguridad de Microsoft Entra ID</p>
+            <p>Generado el $(Get-Date -Format "dd/MM/yyyy") a las $(Get-Date -Format "HH:mm:ss")</p>
+        </footer>
+    </div>
+    
+    <script>
+        // Función para colapsar/expandir secciones
+        document.querySelectorAll('.section h2').forEach(header => {
+            header.addEventListener('click', () => {
+                const section = header.parentElement;
+                section.classList.toggle('collapsed');
+            });
+        });
+    </script>
+</body>
+</html>
+"@
+
+# Inicializar el contenido HTML
+$htmlContent = ""
 
 # Verificar módulos disponibles
 $moduleFound = $false
@@ -126,12 +583,9 @@ try {
         
         # Obtener información del tenant
         $tenantDetails = Get-AzureADTenantDetail
-        $tenantInfo = @"
-Fecha de auditoría: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-Tenant ID: $($tenantDetails.ObjectId)
-Nombre del tenant: $($tenantDetails.DisplayName)
-Dominios verificados: $((Get-AzureADDomain | Where-Object { $_.IsVerified -eq $true }).Count)
-"@
+        $tenantName = $tenantDetails.DisplayName
+        $tenantId = $tenantDetails.ObjectId
+        $verifiedDomains = (Get-AzureADDomain | Where-Object { $_.IsVerified -eq $true }).Count
     }
     else {
         Connect-MsolService -ErrorAction Stop
@@ -139,15 +593,43 @@ Dominios verificados: $((Get-AzureADDomain | Where-Object { $_.IsVerified -eq $t
         
         # Obtener información del tenant
         $tenantDetails = Get-MsolCompanyInformation
-        $tenantInfo = @"
-Fecha de auditoría: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-Tenant ID: $($tenantDetails.ObjectId)
-Nombre del tenant: $($tenantDetails.DisplayName)
-Dominios verificados: $((Get-MsolDomain | Where-Object { $_.Status -eq "Verified" }).Count)
-"@
+        $tenantName = $tenantDetails.DisplayName
+        $tenantId = $tenantDetails.ObjectId
+        $verifiedDomains = (Get-MsolDomain | Where-Object { $_.Status -eq "Verified" }).Count
     }
     
-    Write-Report -Section "INFORMACIÓN DEL TENANT" -Content $tenantInfo
+    # Sección de información del tenant
+    $tenantSection = @"
+    <div id="tenant" class="section">
+        <h2>Información del Tenant</h2>
+        <div class="section-content">
+            <table>
+                <tr>
+                    <th>Propiedad</th>
+                    <th>Valor</th>
+                </tr>
+                <tr>
+                    <td>Nombre del Tenant</td>
+                    <td>$tenantName</td>
+                </tr>
+                <tr>
+                    <td>ID del Tenant</td>
+                    <td>$tenantId</td>
+                </tr>
+                <tr>
+                    <td>Dominios Verificados</td>
+                    <td>$verifiedDomains</td>
+                </tr>
+                <tr>
+                    <td>Fecha de Auditoría</td>
+                    <td>$(Get-Date -Format "dd/MM/yyyy HH:mm:ss")</td>
+                </tr>
+            </table>
+        </div>
+    </div>
+"@
+
+    $htmlContent += $tenantSection
 }
 catch {
     Write-Log "Error durante la autenticación: $_" -Level "ERROR"
@@ -179,112 +661,229 @@ try {
         $memberUsers = $users | Where-Object { $_.UserType -eq "Member" }
     }
     
-    $userStats = @"
-Total de usuarios: $($users.Count)
-Usuarios habilitados: $($enabledUsers.Count)
-Usuarios deshabilitados: $($disabledUsers.Count)
-Usuarios invitados: $($guestUsers.Count)
-Usuarios miembros: $($memberUsers.Count)
+    # Calcular porcentajes para gráficos
+    $enabledPercentage = [math]::Round(($enabledUsers.Count / $users.Count) * 100)
+    $guestPercentage = [math]::Round(($guestUsers.Count / $users.Count) * 100)
+    
+    # Sección de estadísticas de usuarios
+    $usuariosSection = @"
+    <div id="usuarios" class="section">
+        <h2>Estadísticas de Usuarios</h2>
+        <div class="section-content">
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h3>Total de Usuarios</h3>
+                    <div class="stat">$($users.Count)</div>
+                    <div class="description">Número total de cuentas de usuario en el directorio</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Usuarios Habilitados</h3>
+                    <div class="stat">$($enabledUsers.Count)</div>
+                    <div class="description">Cuentas activas que pueden iniciar sesión</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Usuarios Deshabilitados</h3>
+                    <div class="stat">$($disabledUsers.Count)</div>
+                    <div class="description">Cuentas bloqueadas que no pueden iniciar sesión</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Usuarios Invitados</h3>
+                    <div class="stat">$($guestUsers.Count)</div>
+                    <div class="description">Usuarios externos invitados al directorio</div>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Distribución de Usuarios</h3>
+                <div style="display: flex; gap: 30px; justify-content: center;">
+                    <div style="text-align: center;">
+                        <h4>Estado de Cuentas</h4>
+                        <div class="pie-chart" style="--primary-percentage: ${enabledPercentage}%;"></div>
+                        <div class="pie-legend">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--primary-color);"></div>
+                                <span>Habilitados ($enabledPercentage%)</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--warning-color);"></div>
+                                <span>Deshabilitados ($(100 - $enabledPercentage)%)</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="text-align: center;">
+                        <h4>Tipo de Usuarios</h4>
+                        <div class="pie-chart" style="--primary-percentage: $(100 - $guestPercentage)%;"></div>
+                        <div class="pie-legend">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--primary-color);"></div>
+                                <span>Miembros ($(100 - $guestPercentage)%)</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--warning-color);"></div>
+                                <span>Invitados ($guestPercentage%)</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
 "@
-    
-    Write-Report -Section "ESTADÍSTICAS DE USUARIOS" -Content $userStats
-    
+
     # Obtener roles de directorio y sus miembros
     if ($usingAzureAD) {
         $directoryRoles = Get-AzureADDirectoryRole
         
-        $roleOutput = "ROLES DE ADMINISTRADOR Y MIEMBROS:`n`n"
+        $rolesSection = @"
+            <div class="divider"></div>
+            <h3>Roles de Administrador</h3>
+            <p>Total de roles: $($directoryRoles.Count)</p>
+"@
+        
+        # Roles críticos para destacar
+        $criticalRoles = @(
+            "Global Administrator", 
+            "Privileged Role Administrator", 
+            "User Administrator", 
+            "Exchange Administrator", 
+            "SharePoint Administrator", 
+            "Conditional Access Administrator",
+            "Security Administrator",
+            "Application Administrator"
+        )
         
         foreach ($role in $directoryRoles) {
             $roleMembers = Get-AzureADDirectoryRoleMember -ObjectId $role.ObjectId
             
             if ($roleMembers.Count -gt 0) {
-                $roleOutput += "Rol: $($role.DisplayName)`n"
-                $roleOutput += "Descripción: $($role.Description)`n"
-                $roleOutput += "Miembros ($($roleMembers.Count)):`n"
+                $isCritical = $criticalRoles -contains $role.DisplayName
+                $criticalClass = if ($isCritical) { "critical-role" } else { "" }
                 
-                foreach ($member in $roleMembers) {
-                    if ($member.ObjectType -eq "User") {
-                        $roleOutput += "  - $($member.DisplayName) ($($member.UserPrincipalName))`n"
+                $rolesSection += @"
+                <div class="role-card $criticalClass">
+                    <h3>$($role.DisplayName)</h3>
+                    <p>$($role.Description)</p>
+                    <p>Miembros: $($roleMembers.Count)</p>
+"@
+                
+                if ($roleMembers.Count -gt 0) {
+                    $rolesSection += "<ul>"
+                    foreach ($member in $roleMembers) {
+                        if ($member.ObjectType -eq "User") {
+                            $rolesSection += "<li>$($member.DisplayName) ($($member.UserPrincipalName))</li>"
+                        }
+                        else {
+                            $rolesSection += "<li>[Grupo/App] $($member.DisplayName)</li>"
+                        }
                     }
-                    else {
-                        $roleOutput += "  - [Grupo/App] $($member.DisplayName)`n"
-                    }
+                    $rolesSection += "</ul>"
                 }
                 
-                # Marcar roles críticos
-                $criticalRoles = @(
-                    "Global Administrator", 
-                    "Privileged Role Administrator", 
-                    "User Administrator", 
-                    "Exchange Administrator", 
-                    "SharePoint Administrator", 
-                    "Conditional Access Administrator",
-                    "Security Administrator",
-                    "Application Administrator"
-                )
-                
-                if ($criticalRoles -contains $role.DisplayName) {
-                    $roleOutput += "⚠️ ALERTA: Este es un rol crítico con altos privilegios`n"
-                    
-                    # Verificar si hay demasiados administradores globales
-                    if ($role.DisplayName -eq "Global Administrator" -and $roleMembers.Count -gt 5) {
-                        $roleOutput += "⚠️ ALERTA: Hay $($roleMembers.Count) Administradores Globales. Microsoft recomienda limitar este número.`n"
-                    }
+                if ($isCritical) {
+                    $rolesSection += @"
+                    <div class="alert">
+                        <span class="alert-icon">⚠️</span> Este es un rol crítico con altos privilegios
+                    </div>
+"@
                 }
                 
-                $roleOutput += "---`n"
+                # Verificar si hay demasiados administradores globales
+                if ($role.DisplayName -eq "Global Administrator" -and $roleMembers.Count -gt 5) {
+                    $rolesSection += @"
+                    <div class="alert">
+                        <span class="alert-icon">⚠️</span> Hay $($roleMembers.Count) Administradores Globales. Microsoft recomienda limitar este número.
+                    </div>
+"@
+                }
+                
+                $rolesSection += "</div>"
             }
         }
     }
     else {
         $directoryRoles = Get-MsolRole
         
-        $roleOutput = "ROLES DE ADMINISTRADOR Y MIEMBROS:`n`n"
+        $rolesSection = @"
+            <div class="divider"></div>
+            <h3>Roles de Administrador</h3>
+            <p>Total de roles: $($directoryRoles.Count)</p>
+"@
+        
+        # Roles críticos para destacar
+        $criticalRoles = @(
+            "Company Administrator", # Global Administrator en MSOnline
+            "User Account Administrator", 
+            "Exchange Service Administrator", 
+            "SharePoint Service Administrator", 
+            "Conditional Access Administrator",
+            "Security Administrator",
+            "Application Administrator"
+        )
         
         foreach ($role in $directoryRoles) {
             $roleMembers = Get-MsolRoleMember -RoleObjectId $role.ObjectId
             
             if ($roleMembers.Count -gt 0) {
-                $roleOutput += "Rol: $($role.Name)`n"
-                $roleOutput += "Descripción: $($role.Description)`n"
-                $roleOutput += "Miembros ($($roleMembers.Count)):`n"
+                $isCritical = $criticalRoles -contains $role.Name
+                $criticalClass = if ($isCritical) { "critical-role" } else { "" }
                 
-                foreach ($member in $roleMembers) {
-                    $roleOutput += "  - $($member.DisplayName) ($($member.EmailAddress))`n"
-                }
+                $rolesSection += @"
+                <div class="role-card $criticalClass">
+                    <h3>$($role.Name)</h3>
+                    <p>$($role.Description)</p>
+                    <p>Miembros: $($roleMembers.Count)</p>
+"@
                 
-                # Marcar roles críticos
-                $criticalRoles = @(
-                    "Company Administrator", # Global Administrator en MSOnline
-                    "User Account Administrator", 
-                    "Exchange Service Administrator", 
-                    "SharePoint Service Administrator", 
-                    "Conditional Access Administrator",
-                    "Security Administrator",
-                    "Application Administrator"
-                )
-                
-                if ($criticalRoles -contains $role.Name) {
-                    $roleOutput += "⚠️ ALERTA: Este es un rol crítico con altos privilegios`n"
-                    
-                    # Verificar si hay demasiados administradores globales
-                    if ($role.Name -eq "Company Administrator" -and $roleMembers.Count -gt 5) {
-                        $roleOutput += "⚠️ ALERTA: Hay $($roleMembers.Count) Administradores Globales. Microsoft recomienda limitar este número.`n"
+                if ($roleMembers.Count -gt 0) {
+                    $rolesSection += "<ul>"
+                    foreach ($member in $roleMembers) {
+                        $rolesSection += "<li>$($member.DisplayName) ($($member.EmailAddress))</li>"
                     }
+                    $rolesSection += "</ul>"
                 }
                 
-                $roleOutput += "---`n"
+                if ($isCritical) {
+                    $rolesSection += @"
+                    <div class="alert">
+                        <span class="alert-icon">⚠️</span> Este es un rol crítico con altos privilegios
+                    </div>
+"@
+                }
+                
+                # Verificar si hay demasiados administradores globales
+                if ($role.Name -eq "Company Administrator" -and $roleMembers.Count -gt 5) {
+                    $rolesSection += @"
+                    <div class="alert">
+                        <span class="alert-icon">⚠️</span> Hay $($roleMembers.Count) Administradores Globales. Microsoft recomienda limitar este número.
+                    </div>
+"@
+                }
+                
+                $rolesSection += "</div>"
             }
         }
     }
     
-    Write-Report -Section "ROLES DE ADMINISTRADOR" -Content $roleOutput
+    $usuariosSection += $rolesSection
+    $usuariosSection += @"
+        </div>
+    </div>
+"@
+    
+    $htmlContent += $usuariosSection
     Write-Log "Usuarios y administradores analizados correctamente" -Level "INFO"
 }
 catch {
     Write-Log "Error al analizar usuarios y administradores: $_" -Level "ERROR"
-    Write-Report -Section "USUARIOS Y ADMINISTRADORES" -Content "Error al obtener información: $_"
+    $htmlContent += @"
+    <div id="usuarios" class="section">
+        <h2>Estadísticas de Usuarios</h2>
+        <div class="section-content">
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al obtener información: $_
+            </div>
+        </div>
+    </div>
+"@
 }
 #endregion
 
@@ -305,31 +904,59 @@ try {
         }
     }
     
+    $accesoSection = @"
+    <div id="acceso" class="section">
+        <h2>Políticas de Acceso Condicional</h2>
+        <div class="section-content">
+"@
+    
     if ($conditionalAccessPolicies) {
         if ($conditionalAccessPolicies.Count -eq 0) {
-            $policiesOutput = "No se encontraron políticas de acceso condicional configuradas.`n"
-            $policiesOutput += "⚠️ ALERTA: La falta de políticas de acceso condicional puede representar un riesgo de seguridad.`n"
+            $accesoSection += @"
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> No se encontraron políticas de acceso condicional configuradas. La falta de políticas de acceso condicional puede representar un riesgo de seguridad.
+            </div>
+"@
         }
         else {
-            $policiesOutput = "Total de políticas: $($conditionalAccessPolicies.Count)`n`n"
+            $accesoSection += @"
+            <div class="summary-card">
+                <h3>Total de Políticas</h3>
+                <div class="stat">$($conditionalAccessPolicies.Count)</div>
+                <div class="description">Políticas de acceso condicional configuradas</div>
+            </div>
+            
+            <table>
+                <tr>
+                    <th>Nombre</th>
+                    <th>Estado</th>
+                    <th>Requiere MFA</th>
+                </tr>
+"@
             
             foreach ($policy in $conditionalAccessPolicies) {
-                $policiesOutput += "Nombre: $($policy.DisplayName)`n"
-                $policiesOutput += "Estado: $(if ($policy.State -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' })`n"
-                $policiesOutput += "ID: $($policy.Id)`n"
+                $estado = if ($policy.State -eq 'enabled') { 'Habilitado' } else { 'Deshabilitado' }
                 
                 # Verificar si la política requiere MFA
                 $requiresMfa = $false
                 if ($policy.GrantControls.BuiltInControls -contains "mfa") {
                     $requiresMfa = $true
-                    $policiesOutput += "Requiere MFA: Sí`n"
+                    $mfaText = "Sí"
                 }
                 else {
-                    $policiesOutput += "Requiere MFA: No`n"
+                    $mfaText = "No"
                 }
                 
-                $policiesOutput += "---`n"
+                $accesoSection += @"
+                <tr>
+                    <td>$($policy.DisplayName)</td>
+                    <td>$estado</td>
+                    <td>$mfaText</td>
+                </tr>
+"@
             }
+            
+            $accesoSection += "</table>"
             
             # Verificar si hay política de línea base para todos los usuarios
             $hasBaselinePolicy = $conditionalAccessPolicies | Where-Object { 
@@ -339,23 +966,52 @@ try {
             }
             
             if (-not $hasBaselinePolicy) {
-                $policiesOutput += "`n⚠️ ALERTA: No se detectó una política de línea base que requiera MFA para todos los usuarios.`n"
-                $policiesOutput += "Se recomienda implementar al menos una política que requiera MFA para todos los usuarios.`n"
+                $accesoSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> No se detectó una política de línea base que requiera MFA para todos los usuarios. Se recomienda implementar al menos una política que requiera MFA para todos los usuarios.
+                </div>
+"@
+            }
+            else {
+                $accesoSection += @"
+                <div class="success">
+                    <span class="success-icon">✓</span> Se detectó una política de línea base que requiere MFA para todos los usuarios.
+                </div>
+"@
             }
         }
     }
     else {
-        $policiesOutput = "No se pudo obtener información sobre políticas de acceso condicional.`n"
-        $policiesOutput += "Esto puede deberse a que no tiene los permisos necesarios o a que está utilizando el módulo MSOnline, que no admite esta funcionalidad.`n"
-        $policiesOutput += "Recomendación: Verifique manualmente las políticas de acceso condicional en el portal de Azure AD.`n"
+        $accesoSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> No se pudo obtener información sobre políticas de acceso condicional. Esto puede deberse a que no tiene los permisos necesarios o a que está utilizando el módulo MSOnline, que no admite esta funcionalidad.
+        </div>
+        <div class="alert">
+            <span class="alert-icon">⚠️</span> Recomendación: Verifique manualmente las políticas de acceso condicional en el portal de Azure AD.
+        </div>
+"@
     }
     
-    Write-Report -Section "POLÍTICAS DE ACCESO CONDICIONAL" -Content $policiesOutput
+    $accesoSection += @"
+        </div>
+    </div>
+"@
+    
+    $htmlContent += $accesoSection
     Write-Log "Revisión de políticas de acceso condicional completada" -Level "INFO"
 }
 catch {
     Write-Log "Error al revisar políticas de acceso condicional: $_" -Level "ERROR"
-    Write-Report -Section "POLÍTICAS DE ACCESO CONDICIONAL" -Content "Error al obtener información: $_"
+    $htmlContent += @"
+    <div id="acceso" class="section">
+        <h2>Políticas de Acceso Condicional</h2>
+        <div class="section-content">
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al obtener información: $_
+            </div>
+        </div>
+    </div>
+"@
 }
 #endregion
 
@@ -363,7 +1019,11 @@ catch {
 Write-Log "4. Verificando configuraciones de MFA..." -Level "INFO"
 
 try {
-    $mfaConfig = "CONFIGURACIÓN GENERAL DE MFA:`n`n"
+    $mfaSection = @"
+    <div id="mfa" class="section">
+        <h2>Configuración de MFA</h2>
+        <div class="section-content">
+"@
     
     # Verificar si los valores predeterminados de seguridad están habilitados
     if ($usingAzureAD) {
@@ -372,23 +1032,46 @@ try {
             $securityDefaults = Get-AzureADMSIdentitySecurityDefaultsEnforcementPolicy -ErrorAction Stop
             
             if ($securityDefaults) {
-                $mfaConfig += "Valores predeterminados de seguridad: $(if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' })`n"
+                $securityDefaultsStatus = if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' }
+                
+                $mfaSection += @"
+                <div class="summary-card">
+                    <h3>Valores Predeterminados de Seguridad</h3>
+                    <div class="stat">$securityDefaultsStatus</div>
+                    <div class="description">Estado de la configuración de seguridad predeterminada</div>
+                </div>
+"@
                 
                 if ($securityDefaults.IsEnabled) {
-                    $mfaConfig += "✓ BUENA PRÁCTICA: Los valores predeterminados de seguridad están habilitados, lo que requiere MFA para todos los usuarios.`n"
+                    $mfaSection += @"
+                <div class="success">
+                    <span class="success-icon">✓</span> BUENA PRÁCTICA: Los valores predeterminados de seguridad están habilitados, lo que requiere MFA para todos los usuarios.
+                </div>
+"@
                 }
                 else {
-                    $mfaConfig += "⚠️ ALERTA: Los valores predeterminados de seguridad están deshabilitados. Asegúrese de tener políticas de acceso condicional configuradas para requerir MFA.`n"
+                    $mfaSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA: Los valores predeterminados de seguridad están deshabilitados. Asegúrese de tener políticas de acceso condicional configuradas para requerir MFA.
+                </div>
+"@
                 }
             }
         }
         catch {
-            $mfaConfig += "No se pudo obtener información sobre los valores predeterminados de seguridad: $_`n"
+            $mfaSection += @"
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> No se pudo obtener información sobre los valores predeterminados de seguridad: $_
+            </div>
+"@
         }
     }
     
     # Analizar estado de MFA por usuario
-    $mfaStatusOutput = "`nESTADO DE MFA POR USUARIO:`n"
+    $mfaSection += @"
+        <div class="divider"></div>
+        <h3>Estado de MFA por Usuario</h3>
+"@
     
     # Obtener usuarios (limitado a 100 para evitar problemas de rendimiento)
     if ($usingAzureAD) {
@@ -401,6 +1084,7 @@ try {
     $usersWithoutMfa = 0
     $adminsWithoutMfa = 0
     $totalChecked = 0
+    $usersWithoutMfaList = @()
     
     foreach ($user in $usersToCheck) {
         $totalChecked++
@@ -414,7 +1098,6 @@ try {
                     
                     if (-not $mfaStatus -or $mfaStatus.Count -eq 0) {
                         $usersWithoutMfa++
-                        $mfaStatusOutput += "- $($user.DisplayName) ($($user.UserPrincipalName)) no tiene MFA configurado`n"
                         
                         # Verificar si es administrador
                         $isAdmin = $false
@@ -422,22 +1105,28 @@ try {
                             $roleMembers = Get-AzureADDirectoryRoleMember -ObjectId $role.ObjectId
                             if ($roleMembers | Where-Object { $_.ObjectId -eq $user.ObjectId }) {
                                 $isAdmin = $true
+                                $adminsWithoutMfa++
                                 break
                             }
                         }
                         
-                        if ($isAdmin) {
-                            $adminsWithoutMfa++
-                            $mfaStatusOutput += "  ⚠️ ALERTA: Este usuario tiene roles de administrador`n"
+                        $usersWithoutMfaList += [PSCustomObject]@{
+                            DisplayName = $user.DisplayName
+                            UserPrincipalName = $user.UserPrincipalName
+                            IsAdmin = $isAdmin
                         }
                     }
                 }
                 catch {
-                    $mfaStatusOutput += "- Error al verificar MFA para $($user.DisplayName): $_`n"
+                    Write-Log "Error al verificar MFA para $($user.DisplayName): $_" -Level "WARNING"
                 }
             }
             else {
-                $mfaStatusOutput += "No se puede verificar el estado de MFA individual con el módulo AzureAD. Se requiere MSOnline.`n"
+                $mfaSection += @"
+                <div class="info-box">
+                    <span class="info-icon">ℹ️</span> No se puede verificar el estado de MFA individual con el módulo AzureAD. Se requiere MSOnline.
+                </div>
+"@
                 break
             }
         }
@@ -448,7 +1137,6 @@ try {
                 
                 if (-not $mfaStatus -or $mfaStatus.Count -eq 0) {
                     $usersWithoutMfa++
-                    $mfaStatusOutput += "- $($user.DisplayName) ($($user.UserPrincipalName)) no tiene MFA configurado`n"
                     
                     # Verificar si es administrador
                     $isAdmin = $false
@@ -456,50 +1144,140 @@ try {
                         $roleMembers = Get-MsolRoleMember -RoleObjectId $role.ObjectId
                         if ($roleMembers | Where-Object { $_.EmailAddress -eq $user.UserPrincipalName }) {
                             $isAdmin = $true
+                            $adminsWithoutMfa++
                             break
                         }
                     }
                     
-                    if ($isAdmin) {
-                        $adminsWithoutMfa++
-                        $mfaStatusOutput += "  ⚠️ ALERTA: Este usuario tiene roles de administrador`n"
+                    $usersWithoutMfaList += [PSCustomObject]@{
+                        DisplayName = $user.DisplayName
+                        UserPrincipalName = $user.UserPrincipalName
+                        IsAdmin = $isAdmin
                     }
                 }
             }
             catch {
-                $mfaStatusOutput += "- Error al verificar MFA para $($user.DisplayName): $_`n"
+                Write-Log "Error al verificar MFA para $($user.DisplayName): $_" -Level "WARNING"
             }
         }
     }
     
     # Añadir estadísticas de MFA
     if ($totalChecked -gt 0) {
-        $mfaStats = @"
-ESTADÍSTICAS DE MFA:
-
-Usuarios verificados: $totalChecked
-Usuarios sin MFA: $usersWithoutMfa ($(if ($totalChecked -gt 0) { [math]::Round(($usersWithoutMfa / $totalChecked) * 100, 2) } else { 0 })%)
-Administradores sin MFA: $adminsWithoutMfa
+        $mfaPercentage = [math]::Round((($totalChecked - $usersWithoutMfa) / $totalChecked) * 100)
+        
+        $mfaSection += @"
+        <div class="summary-grid">
+            <div class="summary-card">
+                <h3>Usuarios Verificados</h3>
+                <div class="stat">$totalChecked</div>
+                <div class="description">Número de usuarios analizados</div>
+            </div>
+            <div class="summary-card">
+                <h3>Usuarios sin MFA</h3>
+                <div class="stat">$usersWithoutMfa</div>
+                <div class="description">Usuarios que no tienen MFA configurado</div>
+            </div>
+            <div class="summary-card">
+                <h3>Administradores sin MFA</h3>
+                <div class="stat">$adminsWithoutMfa</div>
+                <div class="description">Administradores sin protección MFA</div>
+            </div>
+            <div class="summary-card">
+                <h3>Adopción de MFA</h3>
+                <div class="stat">$mfaPercentage%</div>
+                <div class="description">Porcentaje de usuarios con MFA</div>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>Estado de MFA</h3>
+            <div class="pie-chart" style="--primary-percentage: ${mfaPercentage}%;"></div>
+            <div class="pie-legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: var(--primary-color);"></div>
+                    <span>Con MFA ($mfaPercentage%)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: var(--warning-color);"></div>
+                    <span>Sin MFA ($(100 - $mfaPercentage)%)</span>
+                </div>
+            </div>
+        </div>
 "@
         
         if ($adminsWithoutMfa -gt 0) {
-            $mfaStats += "`n⚠️ ALERTA CRÍTICA: Hay administradores sin MFA configurado. Esto representa un riesgo de seguridad significativo.`n"
+            $mfaSection += @"
+        <div class="alert">
+            <span class="alert-icon">⚠️</span> ALERTA CRÍTICA: Hay administradores sin MFA configurado. Esto representa un riesgo de seguridad significativo.
+        </div>
+"@
         }
         
         if ($usersWithoutMfa / $totalChecked -gt 0.5) {
-            $mfaStats += "`n⚠️ ALERTA: Más del 50% de los usuarios no tienen MFA configurado.`n"
+            $mfaSection += @"
+        <div class="alert">
+            <span class="alert-icon">⚠️</span> ALERTA: Más del 50% de los usuarios no tienen MFA configurado.
+        </div>
+"@
+        }
+        
+        # Mostrar lista de usuarios sin MFA
+        if ($usersWithoutMfaList.Count -gt 0) {
+            $mfaSection += @"
+        <div class="divider"></div>
+        <h3>Usuarios sin MFA Configurado</h3>
+        <table>
+            <tr>
+                <th>Nombre</th>
+                <th>Correo</th>
+                <th>Administrador</th>
+            </tr>
+"@
+            
+            foreach ($user in $usersWithoutMfaList) {
+                $adminIcon = if ($user.IsAdmin) { "⚠️" } else { "" }
+                
+                $mfaSection += @"
+            <tr>
+                <td>$($user.DisplayName)</td>
+                <td>$($user.UserPrincipalName)</td>
+                <td>$adminIcon</td>
+            </tr>
+"@
+            }
+            
+            $mfaSection += "</table>"
         }
     }
     else {
-        $mfaStats = "No se pudo verificar el estado de MFA para ningún usuario.`n"
+        $mfaSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> No se pudo verificar el estado de MFA para ningún usuario.
+        </div>
+"@
     }
     
-    Write-Report -Section "CONFIGURACIÓN DE MFA" -Content "$mfaConfig`n`n$mfaStats`n`n$mfaStatusOutput"
+    $mfaSection += @"
+        </div>
+    </div>
+"@
+    
+    $htmlContent += $mfaSection
     Write-Log "Configuraciones de MFA verificadas correctamente" -Level "INFO"
 }
 catch {
     Write-Log "Error al verificar configuraciones de MFA: $_" -Level "ERROR"
-    Write-Report -Section "CONFIGURACIÓN DE MFA" -Content "Error al obtener información: $_"
+    $htmlContent += @"
+    <div id="mfa" class="section">
+        <h2>Configuración de MFA</h2>
+        <div class="section-content">
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al obtener información: $_
+            </div>
+        </div>
+    </div>
+"@
 }
 #endregion
 
@@ -507,77 +1285,105 @@ catch {
 Write-Log "5. Analizando aplicaciones y permisos..." -Level "INFO"
 
 try {
+    $aplicacionesSection = @"
+    <div id="aplicaciones" class="section">
+        <h2>Aplicaciones y Permisos</h2>
+        <div class="section-content">
+"@
+    
     # Obtener aplicaciones registradas
     if ($usingAzureAD) {
         $applications = Get-AzureADApplication -All $true
         
         if ($applications.Count -eq 0) {
-            $appsOutput = "No se encontraron aplicaciones registradas en Azure AD.`n"
+            $aplicacionesSection += @"
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> No se encontraron aplicaciones registradas en Azure AD.
+            </div>
+"@
         }
         else {
-            $appsOutput = "APLICACIONES REGISTRADAS EN AZURE AD:`n`n"
-            $appsOutput += "Total de aplicaciones: $($applications.Count)`n`n"
+            $aplicacionesSection += @"
+            <div class="summary-card">
+                <h3>Aplicaciones Registradas</h3>
+                <div class="stat">$($applications.Count)</div>
+                <div class="description">Total de aplicaciones registradas en Azure AD</div>
+            </div>
+            
+            <div class="divider"></div>
+            <h3>Aplicaciones con Secretos o Certificados</h3>
+            <table>
+                <tr>
+                    <th>Nombre</th>
+                    <th>Secretos</th>
+                    <th>Certificados</th>
+                    <th>Próxima Expiración</th>
+                </tr>
+"@
             
             foreach ($app in $applications) {
-                $appsOutput += "Nombre: $($app.DisplayName)`n"
-                $appsOutput += "ID de aplicación: $($app.AppId)`n"
-                $appsOutput += "ID de objeto: $($app.ObjectId)`n"
-                
                 # Verificar si la aplicación tiene secretos
                 $appCredentials = Get-AzureADApplicationPasswordCredential -ObjectId $app.ObjectId
+                $appCertificates = Get-AzureADApplicationKeyCredential -ObjectId $app.ObjectId
                 
-                if ($appCredentials.Count -gt 0) {
-                    $appsOutput += "Secretos configurados: $($appCredentials.Count)`n"
+                if ($appCredentials.Count -gt 0 -or $appCertificates.Count -gt 0) {
+                    # Encontrar la fecha de expiración más cercana
+                    $nextExpiry = $null
+                    $daysUntilExpiry = 9999
                     
                     foreach ($cred in $appCredentials) {
                         $expiryDate = $cred.EndDate
-                        $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
+                        $days = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
                         
-                        $appsOutput += "  - Secreto expira el: $expiryDate (en $daysUntilExpiry días)`n"
-                        
-                        if ($daysUntilExpiry -lt 30) {
-                            $appsOutput += "    ⚠️ ALERTA: Este secreto expirará pronto`n"
+                        if ($days -lt $daysUntilExpiry) {
+                            $nextExpiry = $expiryDate
+                            $daysUntilExpiry = $days
                         }
                     }
-                }
-                else {
-                    $appsOutput += "Secretos configurados: 0`n"
-                }
-                
-                # Verificar si la aplicación tiene certificados
-                $appCertificates = Get-AzureADApplicationKeyCredential -ObjectId $app.ObjectId
-                
-                if ($appCertificates.Count -gt 0) {
-                    $appsOutput += "Certificados configurados: $($appCertificates.Count)`n"
                     
                     foreach ($cert in $appCertificates) {
                         $expiryDate = $cert.EndDate
-                        $daysUntilExpiry = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
+                        $days = (New-TimeSpan -Start (Get-Date) -End $expiryDate).Days
                         
-                        $appsOutput += "  - Certificado expira el: $expiryDate (en $daysUntilExpiry días)`n"
-                        
-                        if ($daysUntilExpiry -lt 30) {
-                            $appsOutput += "    ⚠️ ALERTA: Este certificado expirará pronto`n"
+                        if ($days -lt $daysUntilExpiry) {
+                            $nextExpiry = $expiryDate
+                            $daysUntilExpiry = $days
                         }
                     }
+                    
+                    $expiryClass = ""
+                    if ($daysUntilExpiry -lt 30) {
+                        $expiryClass = "style='color: var(--warning-color); font-weight: bold;'"
+                    }
+                    
+                    $aplicacionesSection += @"
+                <tr>
+                    <td>$($app.DisplayName)</td>
+                    <td>$($appCredentials.Count)</td>
+                    <td>$($appCertificates.Count)</td>
+                    <td $expiryClass>$($nextExpiry.ToString("dd/MM/yyyy")) ($daysUntilExpiry días)</td>
+                </tr>
+"@
                 }
-                else {
-                    $appsOutput += "Certificados configurados: 0`n"
-                }
-                
-                $appsOutput += "---`n"
             }
+            
+            $aplicacionesSection += "</table>"
         }
         
         # Obtener aplicaciones empresariales (service principals)
         $servicePrincipals = Get-AzureADServicePrincipal -All $true | Where-Object { $_.ServicePrincipalType -eq "Application" }
         
-        $spOutput = "APLICACIONES EMPRESARIALES (SERVICE PRINCIPALS):`n`n"
-        $spOutput += "Total de aplicaciones empresariales: $($servicePrincipals.Count)`n`n"
+        $aplicacionesSection += @"
+        <div class="divider"></div>
+        <h3>Aplicaciones Empresariales</h3>
+        <div class="summary-card">
+            <h3>Total de Aplicaciones Empresariales</h3>
+            <div class="stat">$($servicePrincipals.Count)</div>
+            <div class="description">Service Principals de tipo Aplicación</div>
+        </div>
+"@
         
         # Mostrar algunas aplicaciones empresariales importantes
-        $spOutput += "APLICACIONES EMPRESARIALES DESTACADAS:`n`n"
-        
         $importantSps = $servicePrincipals | Where-Object { 
             $_.DisplayName -like "*Microsoft*" -or 
             $_.DisplayName -like "*Azure*" -or 
@@ -585,26 +1391,50 @@ try {
             $_.DisplayName -like "*Graph*" 
         } | Select-Object -First 10
         
-        foreach ($sp in $importantSps) {
-            $spOutput += "- $($sp.DisplayName) (ID: $($sp.AppId))`n"
+        if ($importantSps.Count -gt 0) {
+            $aplicacionesSection += @"
+        <h4>Aplicaciones Empresariales Destacadas</h4>
+        <ul>
+"@
+            
+            foreach ($sp in $importantSps) {
+                $aplicacionesSection += @"
+            <li>$($sp.DisplayName) (ID: $($sp.AppId))</li>
+"@
+            }
+            
+            $aplicacionesSection += "</ul>"
         }
     }
     else {
         # Usando MSOnline - capacidades limitadas para aplicaciones
-        $appsOutput = "APLICACIONES REGISTRADAS EN AZURE AD:`n`n"
-        $appsOutput += "No se puede obtener información detallada sobre aplicaciones registradas con el módulo MSOnline.`n"
-        $appsOutput += "Para un análisis completo de aplicaciones, utilice el módulo AzureAD o Microsoft Graph.`n"
-        
-        $spOutput = "APLICACIONES EMPRESARIALES (SERVICE PRINCIPALS):`n`n"
-        $spOutput += "No se puede obtener información detallada sobre service principals con el módulo MSOnline.`n"
+        $aplicacionesSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> No se puede obtener información detallada sobre aplicaciones registradas con el módulo MSOnline. Para un análisis completo de aplicaciones, utilice el módulo AzureAD o Microsoft Graph.
+        </div>
+"@
     }
     
-    Write-Report -Section "APLICACIONES Y PERMISOS" -Content "$appsOutput`n$spOutput"
+    $aplicacionesSection += @"
+        </div>
+    </div>
+"@
+    
+    $htmlContent += $aplicacionesSection
     Write-Log "Aplicaciones y permisos analizados correctamente" -Level "INFO"
 }
 catch {
     Write-Log "Error al analizar aplicaciones y permisos: $_" -Level "ERROR"
-    Write-Report -Section "APLICACIONES Y PERMISOS" -Content "Error al obtener información: $_"
+    $htmlContent += @"
+    <div id="aplicaciones" class="section">
+        <h2>Aplicaciones y Permisos</h2>
+        <div class="section-content">
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al obtener información: $_
+            </div>
+        </div>
+    </div>
+"@
 }
 #endregion
 
@@ -612,7 +1442,11 @@ catch {
 Write-Log "6. Analizando configuración de seguridad..." -Level "INFO"
 
 try {
-    $securityConfig = "CONFIGURACIÓN DE SEGURIDAD DEL DIRECTORIO:`n`n"
+    $seguridadSection = @"
+    <div id="seguridad" class="section">
+        <h2>Configuración de Seguridad</h2>
+        <div class="section-content">
+"@
     
     # Verificar si los valores predeterminados de seguridad están habilitados
     if ($usingAzureAD) {
@@ -620,19 +1454,39 @@ try {
             $securityDefaults = Get-AzureADMSIdentitySecurityDefaultsEnforcementPolicy -ErrorAction Stop
             
             if ($securityDefaults) {
-                $securityConfig += "Valores predeterminados de seguridad: $(if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' })`n"
+                $securityDefaultsStatus = if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' }
+                
+                $seguridadSection += @"
+                <div class="summary-card">
+                    <h3>Valores Predeterminados de Seguridad</h3>
+                    <div class="stat">$securityDefaultsStatus</div>
+                    <div class="description">Estado de la configuración de seguridad predeterminada</div>
+                </div>
+"@
                 
                 if (-not $securityDefaults.IsEnabled) {
-                    $securityConfig += "⚠️ ALERTA: Los valores predeterminados de seguridad están deshabilitados. Esto puede representar un riesgo si no hay políticas de acceso condicional configuradas adecuadamente.`n"
+                    $seguridadSection += @"
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA: Los valores predeterminados de seguridad están deshabilitados. Esto puede representar un riesgo si no hay políticas de acceso condicional configuradas adecuadamente.
+                </div>
+"@
                 }
             }
         }
         catch {
-            $securityConfig += "No se pudo obtener información sobre los valores predeterminados de seguridad: $_`n"
+            $seguridadSection += @"
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> No se pudo obtener información sobre los valores predeterminados de seguridad: $_
+            </div>
+"@
         }
     }
     else {
-        $securityConfig += "No se puede verificar la configuración de valores predeterminados de seguridad con el módulo MSOnline.`n"
+        $seguridadSection += @"
+        <div class="info-box">
+            <span class="info-icon">ℹ️</span> No se puede verificar la configuración de valores predeterminados de seguridad con el módulo MSOnline.
+        </div>
+"@
     }
     
     # Verificar configuración de contraseñas
@@ -640,108 +1494,224 @@ try {
         try {
             $passwordPolicy = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain
             
-            $securityConfig += "`nPOLÍTICA DE CONTRASEÑAS:`n"
-            $securityConfig += "Validez de contraseña: $($passwordPolicy.ValidityPeriod) $($passwordPolicy.ValidityPeriodType)`n"
-            $securityConfig += "Notificación previa a expiración: $($passwordPolicy.NotificationDays) días`n"
+            $seguridadSection += @"
+            <div class="divider"></div>
+            <h3>Política de Contraseñas</h3>
+            <table>
+                <tr>
+                    <th>Configuración</th>
+                    <th>Valor</th>
+                </tr>
+                <tr>
+                    <td>Validez de contraseña</td>
+                    <td>$($passwordPolicy.ValidityPeriod) $($passwordPolicy.ValidityPeriodType)</td>
+                </tr>
+                <tr>
+                    <td>Notificación previa a expiración</td>
+                    <td>$($passwordPolicy.NotificationDays) días</td>
+                </tr>
+"@
+            
+            # Obtener configuración de complejidad de contraseñas
+            try {
+                $strongPasswordRequired = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain | Select-Object -ExpandProperty StrongPasswordRequired
+                
+                $seguridadSection += @"
+                <tr>
+                    <td>Contraseñas seguras requeridas</td>
+                    <td>$strongPasswordRequired</td>
+                </tr>
+"@
+            }
+            catch {
+                $seguridadSection += @"
+                <tr>
+                    <td>Contraseñas seguras requeridas</td>
+                    <td>Error al obtener información</td>
+                </tr>
+"@
+            }
+            
+            $seguridadSection += "</table>"
             
             if ($passwordPolicy.ValidityPeriod -eq 0) {
-                $securityConfig += "✓ BUENA PRÁCTICA: Las contraseñas no expiran (política moderna de contraseñas)`n"
+                $seguridadSection += @"
+            <div class="success">
+                <span class="success-icon">✓</span> BUENA PRÁCTICA: Las contraseñas no expiran (política moderna de contraseñas)
+            </div>
+"@
             }
             elseif ($passwordPolicy.ValidityPeriod -gt 90) {
-                $securityConfig += "⚠️ ALERTA: El período de validez de contraseñas es superior a 90 días`n"
+                $seguridadSection += @"
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> ALERTA: El período de validez de contraseñas es superior a 90 días
+            </div>
+"@
             }
-        }
-        catch {
-            $securityConfig += "`nError al obtener política de contraseñas: $_`n"
-        }
-        
-        # Obtener configuración de complejidad de contraseñas
-        try {
-            $strongPasswordRequired = Get-MsolPasswordPolicy -Domain $tenantDetails.InitialDomain | Select-Object -ExpandProperty StrongPasswordRequired
-            
-            $securityConfig += "Contraseñas seguras requeridas: $strongPasswordRequired`n"
             
             if (-not $strongPasswordRequired) {
-                $securityConfig += "⚠️ ALERTA: No se requieren contraseñas seguras`n"
+                $seguridadSection += @"
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> ALERTA: No se requieren contraseñas seguras
+            </div>
+"@
             }
         }
         catch {
-            $securityConfig += "Error al obtener configuración de complejidad de contraseñas: $_`n"
+            $seguridadSection += @"
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> Error al obtener política de contraseñas: $_
+            </div>
+"@
         }
     }
     
-    Write-Report -Section "CONFIGURACIÓN DE SEGURIDAD" -Content $securityConfig
+    $seguridadSection += @"
+        </div>
+    </div>
+"@
+    
+    $htmlContent += $seguridadSection
     Write-Log "Configuración de seguridad analizada correctamente" -Level "INFO"
 }
 catch {
     Write-Log "Error al analizar configuración de seguridad: $_" -Level "ERROR"
-    Write-Report -Section "CONFIGURACIÓN DE SEGURIDAD" -Content "Error al obtener información: $_"
+    $htmlContent += @"
+    <div id="seguridad" class="section">
+        <h2>Configuración de Seguridad</h2>
+        <div class="section-content">
+            <div class="alert">
+                <span class="alert-icon">⚠️</span> Error al obtener información: $_
+            </div>
+        </div>
+    </div>
+"@
 }
 #endregion
 
-#region 7. Reporte Final
-Write-Log "7. Generando reporte final..." -Level "INFO"
+#region 7. Resumen Ejecutivo
+Write-Log "7. Generando resumen ejecutivo..." -Level "INFO"
 
 try {
-    # Generar resumen ejecutivo
-    $resumenEjecutivo = @"
-RESUMEN EJECUTIVO DE AUDITORÍA DE SEGURIDAD DE MICROSOFT ENTRA ID
-================================================================
-
-Fecha de auditoría: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-Tenant: $($tenantDetails.DisplayName)
-Tenant ID: $($tenantDetails.ObjectId)
-
-HALLAZGOS PRINCIPALES:
-
-1. USUARIOS Y ADMINISTRADORES:
-   - Total de usuarios: $($users.Count)
-   - Usuarios habilitados: $($enabledUsers.Count)
-   - Roles de administrador: $($directoryRoles.Count)
-
-2. ACCESO CONDICIONAL:
-   - Políticas de acceso condicional: $(if ($conditionalAccessPolicies) { $conditionalAccessPolicies.Count } else { "No disponible" })
-   - Valores predeterminados de seguridad: $(if ($securityDefaults.IsEnabled) { 'Habilitados' } else { 'Deshabilitados' })
-
-3. MFA Y SEGURIDAD DE IDENTIDAD:
-   - Usuarios sin MFA: $usersWithoutMfa de $totalChecked verificados
-   - Administradores sin MFA: $adminsWithoutMfa
-
-4. APLICACIONES:
-   - Aplicaciones registradas: $(if ($applications) { $applications.Count } else { "No disponible" })
-
-RECOMENDACIONES GENERALES:
-
-1. Implementar MFA para todos los usuarios, especialmente para cuentas de administrador.
-2. Revisar y configurar políticas de acceso condicional para proteger recursos críticos.
-3. Revisar permisos de aplicaciones, especialmente aquellas con permisos elevados.
-4. Habilitar valores predeterminados de seguridad si no hay políticas de acceso condicional configuradas.
-5. Revisar regularmente las asignaciones de roles administrativos para asegurar el principio de mínimo privilegio.
-
-Para más detalles, consulte las secciones específicas de este reporte.
+    # Calcular estadísticas para el resumen
+    $totalUsers = $users.Count
+    $enabledUsersCount = $enabledUsers.Count
+    $totalRoles = $directoryRoles.Count
+    $policiesCount = if ($conditionalAccessPolicies) { $conditionalAccessPolicies.Count } else { "No disponible" }
+    $securityDefaultsEnabled = if ($securityDefaults.IsEnabled) { "Sí" } else { "No" }
+    $usersWithMfaPercentage = if ($totalChecked -gt 0) { [math]::Round((($totalChecked - $usersWithoutMfa) / $totalChecked) * 100) } else { 0 }
+    $applicationsCount = if ($applications) { $applications.Count } else { "No disponible" }
+    
+    # Crear resumen ejecutivo
+    $resumenSection = @"
+    <div id="resumen" class="section executive-summary">
+        <h2>Resumen Ejecutivo</h2>
+        <div class="section-content">
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h3>Usuarios</h3>
+                    <div class="stat">$totalUsers</div>
+                    <div class="description">Total de usuarios en el directorio</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Roles de Administrador</h3>
+                    <div class="stat">$totalRoles</div>
+                    <div class="description">Roles de administrador configurados</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Políticas de Acceso</h3>
+                    <div class="stat">$policiesCount</div>
+                    <div class="description">Políticas de acceso condicional</div>
+                </div>
+                <div class="summary-card">
+                    <h3>Adopción de MFA</h3>
+                    <div class="stat">$usersWithMfaPercentage%</div>
+                    <div class="description">Usuarios con MFA configurado</div>
+                </div>
+            </div>
+            
+            <div class="recommendations">
+                <h3>Recomendaciones Principales</h3>
+                <ol>
+                    <li>Implementar MFA para todos los usuarios, especialmente para cuentas de administrador.</li>
+                    <li>Revisar y configurar políticas de acceso condicional para proteger recursos críticos.</li>
+                    <li>Revisar permisos de aplicaciones, especialmente aquellas con permisos elevados.</li>
+                    <li>Habilitar valores predeterminados de seguridad si no hay políticas de acceso condicional configuradas.</li>
+                    <li>Revisar regularmente las asignaciones de roles administrativos para asegurar el principio de mínimo privilegio.</li>
+                </ol>
+            </div>
+            
+            <div class="divider"></div>
+            
+            <div class="chart-container">
+                <h3>Resumen de Seguridad</h3>
+                <div style="display: flex; gap: 30px; justify-content: center;">
+                    <div style="text-align: center;">
+                        <h4>Adopción de MFA</h4>
+                        <div class="pie-chart" style="--primary-percentage: ${usersWithMfaPercentage}%;"></div>
+                        <div class="pie-legend">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--primary-color);"></div>
+                                <span>Con MFA ($usersWithMfaPercentage%)</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--warning-color);"></div>
+                                <span>Sin MFA ($(100 - $usersWithMfaPercentage)%)</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="text-align: center;">
+                        <h4>Estado de Usuarios</h4>
+                        <div class="pie-chart" style="--primary-percentage: ${enabledPercentage}%;"></div>
+                        <div class="pie-legend">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--primary-color);"></div>
+                                <span>Habilitados ($enabledPercentage%)</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: var(--warning-color);"></div>
+                                <span>Deshabilitados ($(100 - $enabledPercentage)%)</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 "@
-
-    # Añadir resumen ejecutivo al inicio del reporte
-    $reportContent = Get-Content -Path $reportFile -Raw
-    $newReportContent = $resumenEjecutivo + "`n`n" + $reportContent
-    Set-Content -Path $reportFile -Value $newReportContent
     
-    Write-Log "Reporte final generado correctamente en: $reportFile" -Level "INFO"
-    Write-Log "Log de la auditoría guardado en: $logFile" -Level "INFO"
+    # Insertar el resumen ejecutivo al principio del contenido HTML
+    $htmlContent = $resumenSection + $htmlContent
     
-    # Mostrar ubicación del reporte
-    Write-Host "`nLa auditoría de seguridad de Microsoft Entra ID ha finalizado correctamente." -ForegroundColor Green
-    Write-Host "El reporte completo se encuentra en: $reportFile" -ForegroundColor Cyan
-    Write-Host "El log de la auditoría se encuentra en: $logFile" -ForegroundColor Cyan
+    Write-Log "Resumen ejecutivo generado correctamente" -Level "INFO"
 }
 catch {
-    Write-Log "Error al generar reporte final: $_" -Level "ERROR"
+    Write-Log "Error al generar resumen ejecutivo: $_" -Level "ERROR"
 }
 #endregion
+
+# Generar el archivo HTML completo
+$fullHtml = $htmlHeader + $htmlContent + $htmlFooter
+Set-Content -Path $reportFile -Value $fullHtml
 
 # Desconectar sesiones
 if ($usingAzureAD) {
     Disconnect-AzureAD -ErrorAction SilentlyContinue
 }
 
-Write-Log "Auditoría de seguridad completada" -Level "INFO"
+Write-Log "Reporte HTML generado correctamente en: $reportFile" -Level "INFO"
+Write-Log "Log de la auditoría guardado en: $logFile" -Level "INFO"
+
+# Mostrar ubicación del reporte
+Write-Host "`nLa auditoría de seguridad de Microsoft Entra ID ha finalizado correctamente." -ForegroundColor Green
+Write-Host "El reporte HTML se encuentra en: $reportFile" -ForegroundColor Cyan
+Write-Host "El log de la auditoría se encuentra en: $logFile" -ForegroundColor Cyan
+
+# Abrir el reporte HTML automáticamente
+try {
+    Start-Process $reportFile
+}
+catch {
+    Write-Host "No se pudo abrir el reporte automáticamente. Por favor, ábralo manualmente." -ForegroundColor Yellow
+}
