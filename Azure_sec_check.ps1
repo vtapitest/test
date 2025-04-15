@@ -8,6 +8,7 @@
     Requisitos:
     - Módulos MSOnline o AzureAD
     - Permisos básicos de lectura en Azure AD
+    Autor: v0
     Fecha: 15/04/2025
 #>
 
@@ -19,11 +20,22 @@ $WarningPreference = "SilentlyContinue"
 # Crear carpeta para el reporte si no existe
 $reportFolder = "$env:USERPROFILE\EntraIDSecurityAudit"
 if (-not (Test-Path -Path $reportFolder)) {
-    New-Item -ItemType Directory -Path $reportFolder | Out-Null
+    try {
+        New-Item -ItemType Directory -Path $reportFolder -Force | Out-Null
+        Write-Host "Carpeta de reportes creada en: $reportFolder" -ForegroundColor Green
+    }
+    catch {
+        # Si no se puede crear en el perfil del usuario, intentar en el directorio temporal
+        $reportFolder = [System.IO.Path]::GetTempPath() + "EntraIDSecurityAudit"
+        New-Item -ItemType Directory -Path $reportFolder -Force -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "Carpeta de reportes creada en directorio temporal: $reportFolder" -ForegroundColor Yellow
+    }
 }
 
-$reportFile = "$reportFolder\EntraIDSecurityAuditReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
-$logFile = "$reportFolder\EntraIDSecurityAuditLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+# Generar nombres de archivos con timestamp
+$timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$reportFile = "$reportFolder\EntraIDSecurityAuditReport_$timestamp.html"
+$logFile = "$reportFolder\EntraIDSecurityAuditLog_$timestamp.txt"
 
 # Función para escribir en el log
 function Write-Log {
@@ -39,7 +51,13 @@ function Write-Log {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logEntry = "[$timestamp] [$Level] $Message"
     
-    Add-Content -Path $logFile -Value $logEntry
+    try {
+        Add-Content -Path $logFile -Value $logEntry -ErrorAction Stop
+    }
+    catch {
+        # Si no se puede escribir en el archivo de log, mostrar solo en consola
+        Write-Host "No se pudo escribir en el archivo de log: $_" -ForegroundColor Red
+    }
     
     switch ($Level) {
         "INFO" { Write-Host $logEntry -ForegroundColor Cyan }
@@ -1109,7 +1127,7 @@ try {
         
         $mfaSection += @"
         <div class="info-box">
-            <span class="info-icon">ℹ️</span> Nota: No se pudo verificar directamente el estado de los valores predeterminados de seguridad porque el cmdlet requiere Microsoft Graph. El estado mostrado es una estimación basada en otras configuraciones.
+            <span class="info-icon">ℹ️</span> Nota: La verificación directa del estado de los valores predeterminados de seguridad requiere Microsoft Graph API. El estado mostrado es una estimación basada en otras configuraciones observadas.
         </div>
 "@
         
@@ -1164,6 +1182,7 @@ try {
             $usersWithoutMfa = 0
             $adminsWithoutMfa = 0
             $usersWithoutMfaList = @()
+            $adminsWithoutMfaList = @() # Lista específica para administradores sin MFA
             
             # Implementar procesamiento por lotes para evitar errores de pipeline
             Write-Log "Obteniendo todos los usuarios para verificar MFA (procesamiento por lotes)..." -Level "INFO"
@@ -1230,12 +1249,22 @@ try {
                             
                             # Verificar si es administrador - con manejo de errores mejorado
                             $isAdmin = $false
+                            $adminRoles = @()
+                            
                             try {
                                 # Usar Get-MsolUserRole con el parámetro UserPrincipalName para evitar errores
                                 $userRoles = Get-MsolUserRole -UserPrincipalName $user.UserPrincipalName -ErrorAction Stop
                                 if ($userRoles -and $userRoles.Count -gt 0) {
                                     $isAdmin = $true
                                     $adminsWithoutMfa++
+                                    
+                                    # Obtener nombres de roles para mostrar
+                                    foreach ($roleId in $userRoles) {
+                                        $roleName = (Get-MsolRole -ObjectId $roleId.ObjectId).Name
+                                        if ($roleName) {
+                                            $adminRoles += $roleName
+                                        }
+                                    }
                                 }
                             }
                             catch {
@@ -1246,6 +1275,14 @@ try {
                                     if ($userRoles -and $userRoles.Count -gt 0) {
                                         $isAdmin = $true
                                         $adminsWithoutMfa++
+                                        
+                                        # Obtener nombres de roles para mostrar
+                                        foreach ($roleId in $userRoles) {
+                                            $roleName = (Get-MsolRole -ObjectId $roleId.ObjectId).Name
+                                            if ($roleName) {
+                                                $adminRoles += $roleName
+                                            }
+                                        }
                                     }
                                 }
                                 catch {
@@ -1253,13 +1290,22 @@ try {
                                 }
                             }
                             
-                            # Solo guardar los primeros 100 usuarios sin MFA para no sobrecargar el informe
+                            # Guardar información del usuario sin MFA
+                            $userInfo = [PSCustomObject]@{
+                                DisplayName = $user.DisplayName
+                                UserPrincipalName = $user.UserPrincipalName
+                                IsAdmin = $isAdmin
+                                AdminRoles = if ($adminRoles.Count -gt 0) { $adminRoles -join ", " } else { "N/A" }
+                            }
+                            
+                            # Agregar a la lista general de usuarios sin MFA (limitado a 100)
                             if ($usersWithoutMfaList.Count -lt 100) {
-                                $usersWithoutMfaList += [PSCustomObject]@{
-                                    DisplayName = $user.DisplayName
-                                    UserPrincipalName = $user.UserPrincipalName
-                                    IsAdmin = $isAdmin
-                                }
+                                $usersWithoutMfaList += $userInfo
+                            }
+                            
+                            # Si es administrador, siempre agregarlo a la lista de administradores sin MFA
+                            if ($isAdmin) {
+                                $adminsWithoutMfaList += $userInfo
                             }
                         }
                         
@@ -1343,6 +1389,35 @@ try {
 "@
                 }
                 
+                # Mostrar lista de administradores sin MFA (siempre mostrar todos)
+                if ($adminsWithoutMfaList.Count -gt 0) {
+                    $mfaSection += @"
+                <div class="divider"></div>
+                <h3>Administradores sin MFA configurado</h3>
+                <div class="alert">
+                    <span class="alert-icon">⚠️</span> ALERTA CRÍTICA: Los siguientes administradores no tienen MFA configurado. Esto representa un riesgo de seguridad significativo.
+                </div>
+                <table>
+                    <tr>
+                        <th>Nombre</th>
+                        <th>Correo</th>
+                        <th>Roles de Administrador</th>
+                    </tr>
+"@
+                    
+                    foreach ($admin in $adminsWithoutMfaList) {
+                        $mfaSection += @"
+                    <tr class="alert">
+                        <td>$($admin.DisplayName)</td>
+                        <td>$($admin.UserPrincipalName)</td>
+                        <td>$($admin.AdminRoles)</td>
+                    </tr>
+"@
+                    }
+                    
+                    $mfaSection += "</table>"
+                }
+                
                 # Mostrar lista de usuarios sin MFA (limitado a 100 para no sobrecargar el informe)
                 if ($usersWithoutMfaList.Count -gt 0) {
                     $mfaSection += @"
@@ -1389,6 +1464,9 @@ try {
             $mfaSection += @"
             <div class="alert">
                 <span class="alert-icon">⚠️</span> Error al verificar el estado de MFA: $_
+            </div>
+            <div class="info-box">
+                <span class="info-icon">ℹ️</span> Sugerencia: Este error puede ocurrir por limitaciones de la API o permisos insuficientes. Intente ejecutar el script con una cuenta que tenga permisos de administrador global.
             </div>
 "@
         }
@@ -1933,7 +2011,24 @@ catch {
 $fullHtml = $htmlHeader + $htmlContent + $htmlFooter
 
 # Guardar el archivo HTML con codificación UTF-8
-[System.IO.File]::WriteAllText($reportFile, $fullHtml, [System.Text.Encoding]::UTF8)
+try {
+    [System.IO.File]::WriteAllText($reportFile, $fullHtml, [System.Text.Encoding]::UTF8)
+    Write-Log "Reporte HTML generado correctamente en: $reportFile" -Level "INFO"
+}
+catch {
+    Write-Log "Error al guardar el archivo HTML: $_" -Level "ERROR"
+    
+    # Intentar guardar en una ubicación alternativa
+    $alternativeReportFile = [System.IO.Path]::GetTempPath() + "EntraIDSecurityAuditReport_$timestamp.html"
+    try {
+        [System.IO.File]::WriteAllText($alternativeReportFile, $fullHtml, [System.Text.Encoding]::UTF8)
+        Write-Log "Reporte HTML guardado en ubicación alternativa: $alternativeReportFile" -Level "WARNING"
+        $reportFile = $alternativeReportFile
+    }
+    catch {
+        Write-Log "No se pudo guardar el reporte HTML en ninguna ubicación: $_" -Level "ERROR"
+    }
+}
 
 # Desconectar sesiones
 if ($usingAzureAD) {
@@ -1941,10 +2036,14 @@ if ($usingAzureAD) {
 }
 if ($msolineAvailable) {
     # No hay un cmdlet específico para desconectar MSOnline, pero podemos limpiar la sesión
-    [Microsoft.Online.Administration.Automation.ConnectMsolService]::ClearUserSessionState() -ErrorAction SilentlyContinue
+    try {
+        [Microsoft.Online.Administration.Automation.ConnectMsolService]::ClearUserSessionState() -ErrorAction SilentlyContinue
+    }
+    catch {
+        # Ignorar errores al desconectar
+    }
 }
 
-Write-Log "Reporte HTML generado correctamente en: $reportFile" -Level "INFO"
 Write-Log "Log de la auditoría guardado en: $logFile" -Level "INFO"
 
 # Mostrar ubicación del reporte
