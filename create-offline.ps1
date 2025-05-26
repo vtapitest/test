@@ -1,41 +1,60 @@
 # Crear carpeta para archivos
 New-Item -Path ".\docker-offline" -ItemType Directory -Force
 
-# Descargar imagen base de Node.js
+# Descargar SOLO las imágenes base necesarias
+Write-Host "Descargando imágenes base..." -ForegroundColor Cyan
 docker pull bitnami/node:20
-
-# Construir la imagen principal usando buildx (evita problemas de shell)
-docker buildx build --platform linux/amd64 -t cybersec-app:latest .
-
-# Descargar imágenes base adicionales
 docker pull bitnami/postgresql:15
 docker pull bitnami/nginx:1.25
 
-# Guardar todas las imágenes
+# Guardar las imágenes base
+Write-Host "Guardando imágenes base..." -ForegroundColor Cyan
 docker save -o .\docker-offline\node.tar bitnami/node:20
-docker save -o .\docker-offline\cybersec-app.tar cybersec-app:latest
 docker save -o .\docker-offline\postgresql.tar bitnami/postgresql:15
 docker save -o .\docker-offline\nginx.tar bitnami/nginx:1.25
 
-# Copiar docker-compose.yml
-Copy-Item -Path ".\docker-compose.yml" -Destination ".\docker-offline\docker-compose.yml"
+# Copiar archivos del proyecto
+Write-Host "Copiando archivos del proyecto..." -ForegroundColor Cyan
+New-Item -Path ".\docker-offline\project" -ItemType Directory -Force
 
-# Crear script de inicio para Linux
+# Excluir directorios y archivos grandes/innecesarios
+$exclude = @("node_modules", ".next", ".git", "docker-offline", "*.tar", "*.zip")
+
+# Copiar todos los archivos excepto los excluidos
+Get-ChildItem -Path .\ -Exclude $exclude | ForEach-Object {
+    if ($_.PSIsContainer) {
+        Copy-Item -Path $_.FullName -Destination ".\docker-offline\project\$($_.Name)" -Recurse -Force
+    } else {
+        Copy-Item -Path $_.FullName -Destination ".\docker-offline\project\" -Force
+    }
+}
+
+# Crear script de configuración para Linux
 @"
 #!/bin/bash
-echo "Cargando imágenes Docker..."
+echo "=== Configuración del entorno sin internet ==="
+
+echo "Cargando imágenes Docker base..."
 docker load -i node.tar
-docker load -i cybersec-app.tar
 docker load -i postgresql.tar
 docker load -i nginx.tar
-echo "Imágenes cargadas correctamente."
+
+echo "Cambiando al directorio del proyecto..."
+cd ./project
+
+echo "Construyendo la imagen de la aplicación en Linux..."
+docker build -t cybersec-app:latest .
+
 echo "Iniciando contenedores..."
 docker-compose up -d
-echo "Aplicación iniciada correctamente."
-"@ | Out-File -FilePath ".\docker-offline\start.sh" -Encoding utf8
 
-# Comprimir archivos
-Compress-Archive -Path ".\docker-offline\*" -DestinationPath "cybersec-offline.zip" -Force
+echo "=== Configuración completada ==="
+echo "La aplicación debería estar disponible en http://localhost"
+"@ | Out-File -FilePath ".\docker-offline\setup-linux.sh" -Encoding utf8
 
-Write-Host "Paquete listo para transferir a Linux" -ForegroundColor Green
-Write-Host "En Linux, ejecuta: bash start.sh" -ForegroundColor Yellow
+# Comprimir todo para transferencia
+Write-Host "Comprimiendo paquete final..." -ForegroundColor Cyan
+Compress-Archive -Path ".\docker-offline\*" -DestinationPath "cybersec-offline-complete.zip" -Force
+
+Write-Host "¡Paquete listo para transferir a Linux!" -ForegroundColor Green
+Write-Host "En Linux, ejecuta: bash setup-linux.sh" -ForegroundColor Yellow
