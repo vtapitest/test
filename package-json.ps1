@@ -1,103 +1,62 @@
-# Script para instalar específicamente los módulos del package.json
-Write-Host "Instalando módulos específicos del package.json..." -ForegroundColor Green
+# Script simplificado para generar node_modules.tar.gz
+Write-Host "=== Generando node_modules.tar.gz ===" -ForegroundColor Green
 
-# Verificar que Docker está instalado
-if (-not (Get-Command "docker" -ErrorAction SilentlyContinue)) {
-    Write-Host "Error: Docker no está instalado o no está en el PATH." -ForegroundColor Red
-    exit 1
-}
-
-# Crear directorio temporal
+# Crear directorio temporal limpio
 $tempDir = ".\temp-npm"
 if (Test-Path $tempDir) {
     Remove-Item -Path $tempDir -Recurse -Force
 }
 New-Item -Path $tempDir -ItemType Directory -Force
 
-# Copiar solo package.json y package-lock.json
-Write-Host "Copiando archivos de configuración..." -ForegroundColor Yellow
+# Copiar archivos necesarios
+Write-Host "Copiando package.json..." -ForegroundColor Yellow
 Copy-Item -Path ".\package.json" -Destination "$tempDir\package.json" -Force
 if (Test-Path ".\package-lock.json") {
     Copy-Item -Path ".\package-lock.json" -Destination "$tempDir\package-lock.json" -Force
 }
 
-# Crear un Dockerfile simple y directo
-@"
-FROM node:20
-
-WORKDIR /app
-COPY package.json package.json
-COPY package-lock.json* package-lock.json*
-
-# Actualizar npm e instalar dependencias
-RUN npm install -g npm@11.4.1 && \
-    npm install && \
-    echo "Verificando node_modules:" && \
-    ls -la node_modules && \
-    echo "Contando archivos en node_modules:" && \
-    find node_modules -type f | wc -l
-
-# Crear un archivo de verificación
-RUN echo "Instalación completada" > installation_complete.txt
-"@ | Out-File -FilePath "$tempDir\Dockerfile" -Encoding utf8
-
-# Construir la imagen
-Write-Host "Construyendo imagen Docker para instalar dependencias..." -ForegroundColor Yellow
-docker build -t npm-modules-installer $tempDir
-
-# Verificar si la construcción fue exitosa
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: La construcción de la imagen Docker falló." -ForegroundColor Red
-    exit 1
+# Convertir la ruta a formato que Docker entienda en Windows
+$dockerPath = (Resolve-Path $tempDir).Path.Replace('\', '/')
+if ($dockerPath -match '^([A-Za-z]):(.*)$') {
+    $dockerPath = "/$($matches[1].ToLower())$($matches[2])"
 }
 
-# Crear un contenedor y montar un volumen para node_modules
-Write-Host "Ejecutando contenedor para instalar dependencias..." -ForegroundColor Yellow
-docker run --name npm-installer -v "${PWD}\$tempDir\node_modules:/app/node_modules" npm-modules-installer
+# Ejecutar npm install directamente con volumen montado
+Write-Host "Instalando dependencias con Docker..." -ForegroundColor Yellow
+docker run --rm -v "${dockerPath}:/app" -w /app node:20 bash -c "npm install -g npm@11.4.1 && npm install --no-audit --no-fund"
 
-# Verificar si el contenedor se ejecutó correctamente
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: La ejecución del contenedor falló." -ForegroundColor Red
-    exit 1
-}
-
-# Verificar si node_modules se creó correctamente
-if (-not (Test-Path "$tempDir\node_modules") -or (Get-ChildItem "$tempDir\node_modules" -Force | Measure-Object).Count -eq 0) {
-    Write-Host "Error: node_modules no se creó correctamente." -ForegroundColor Red
+# Verificar si se creó node_modules
+if (-not (Test-Path "$tempDir\node_modules")) {
+    Write-Host "Error: node_modules no se creó." -ForegroundColor Red
+    Write-Host "Intentando con sintaxis alternativa de volumen..." -ForegroundColor Yellow
     
-    # Intentar copiar directamente desde el contenedor
-    Write-Host "Intentando copiar node_modules directamente desde el contenedor..." -ForegroundColor Yellow
-    docker cp npm-installer:/app/node_modules $tempDir
+    # Intentar con sintaxis alternativa para Windows
+    $fullPath = (Get-Item $tempDir).FullName
+    docker run --rm -v "${fullPath}:/app" -w /app node:20 bash -c "npm install -g npm@11.4.1 && npm install --no-audit --no-fund"
 }
 
 # Verificar nuevamente
-if (-not (Test-Path "$tempDir\node_modules") -or (Get-ChildItem "$tempDir\node_modules" -Force | Measure-Object).Count -eq 0) {
+if (-not (Test-Path "$tempDir\node_modules")) {
     Write-Host "Error: No se pudo crear node_modules." -ForegroundColor Red
     exit 1
 }
 
+Write-Host "node_modules creado correctamente. Comprimiendo..." -ForegroundColor Green
+
 # Comprimir node_modules
-Write-Host "Comprimiendo node_modules..." -ForegroundColor Yellow
-if (Get-Command "7z.exe" -ErrorAction SilentlyContinue) {
-    # Usar 7-Zip
-    7z a -ttar "$tempDir\node_modules.tar" "$tempDir\node_modules"
-    7z a -tgzip "node_modules.tar.gz" "$tempDir\node_modules.tar"
-    Remove-Item -Path "$tempDir\node_modules.tar" -Force
-} elseif (Get-Command "tar.exe" -ErrorAction SilentlyContinue) {
-    # Usar tar nativo
+if (Get-Command "tar.exe" -ErrorAction SilentlyContinue) {
+    Write-Host "Usando tar para comprimir..." -ForegroundColor Cyan
     tar -czf "node_modules.tar.gz" -C "$tempDir" "node_modules"
 } else {
-    # Usar PowerShell
-    Compress-Archive -Path "$tempDir\node_modules\*" -DestinationPath "node_modules.zip" -Force
+    Write-Host "tar no encontrado. Usando PowerShell para comprimir..." -ForegroundColor Cyan
+    Compress-Archive -Path "$tempDir\node_modules" -DestinationPath "node_modules.zip" -Force
 }
 
 # Limpiar
-Write-Host "Limpiando recursos..." -ForegroundColor Yellow
-docker rm npm-installer -f
-docker rmi npm-modules-installer -f
+Write-Host "Limpiando archivos temporales..." -ForegroundColor Yellow
 Remove-Item -Path $tempDir -Recurse -Force
 
-# Verificar resultado
+# Mostrar resultado
 if (Test-Path "node_modules.tar.gz") {
     $size = (Get-Item "node_modules.tar.gz").Length / 1MB
     Write-Host "¡Éxito! node_modules.tar.gz creado: $([math]::Round($size, 2)) MB" -ForegroundColor Green
